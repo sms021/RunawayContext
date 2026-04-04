@@ -94,7 +94,7 @@ The full research findings and references are in [SUPERCONTEXT.md](SUPERCONTEXT.
 
 ## License
 
-No license yet — this is shared publicly for community feedback. If you find it useful, open an issue or reach out.
+MIT — use it however you want.
 
 ---
 
