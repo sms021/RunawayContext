@@ -10,9 +10,13 @@ Stop re-explaining your codebase every conversation. SuperContext is a structure
 
 Every AI coding session starts from zero. Your assistant doesn't remember yesterday's decisions, doesn't know your project's business rules, and will happily repeat the same mistakes you corrected last week. Context windows are finite, and copy-pasting old conversations doesn't scale.
 
+The common fix — one giant instruction file — creates its own problems. A 2,000-line `CLAUDE.md` or `.cursorrules` eats your context window before you've even asked a question, buries critical rules in walls of text, and becomes impossible to maintain. Your AI ends up ignoring half of it anyway.
+
 ## The Solution
 
-SuperContext implements a **4-tier knowledge architecture** that mirrors how human experts organize information — from always-available muscle memory to deep reference material retrieved on demand:
+SuperContext takes the opposite approach — **small, focused files loaded only when relevant.** Your always-loaded Constitution stays under 200 lines. Project-specific knowledge loads only when you're working in that project. Deep reference data lives in a searchable database and is retrieved on demand. The result: minimal token overhead, fast context loading, and every piece of knowledge exactly where your AI needs it.
+
+It implements a **4-tier knowledge architecture** that mirrors how human experts organize information — from always-available muscle memory to deep reference material retrieved on demand:
 
 | Tier | Name | Loaded | Purpose |
 |------|------|--------|---------|
