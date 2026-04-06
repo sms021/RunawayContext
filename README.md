@@ -33,7 +33,7 @@ Plus **Session Memory** — automatic logging of every conversation so your AI c
 |------|-------------|
 | [**SUPERCONTEXT.md**](SUPERCONTEXT.md) | The full theory and reference guide — 12 sections covering architecture, each tier in detail, session memory, tool-specific setup, scaling, and anti-patterns |
 | [**run_SuperContext.md**](run_SuperContext.md) | The executable prompt — hand this to your AI and say "run this." It discovers your projects, migrates existing content, builds all 4 tiers, sets up session logging, and produces a clean system. No manual steps. |
-| [**BOOTSTRAP.md**](BOOTSTRAP.md) | A simpler starting point for greenfield setups — builds Tier 1 + 2 through guided Q&A |
+| [**BOOTSTRAP.md**](BOOTSTRAP.md) | The manual walkthrough — explains what each tier is, why it matters, and how to build it by hand. Read this if you want to understand the system before (or instead of) running the automated setup. |
 
 ## Quick Start
 
@@ -44,10 +44,10 @@ Plus **Session Memory** — automatic logging of every conversation so your AI c
 4. Answer 4 questions about your setup
 5. The AI builds everything autonomously (~10 minutes)
 
-### Option B: Greenfield (New Project)
-1. Copy `BOOTSTRAP.md` into your project root
-2. Tell your AI: *"Please read and execute BOOTSTRAP.md"*
-3. Answer questions one at a time — it builds a starter Constitution and Living Memory
+### Option B: Manual Setup (Understand What You're Building)
+1. Read [BOOTSTRAP.md](BOOTSTRAP.md) — it walks through each tier, explains why it exists, and tells you exactly how to build it
+2. Build each tier by hand, adapting to your specific setup
+3. Good for: learning the system, custom environments, or teams that want to understand before automating
 
 ## Works With
 
