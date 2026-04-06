@@ -870,21 +870,39 @@ Session ends
     ↓
 Hook fires capture script
     ↓
-Transcript archived to backup storage
+Metadata logged to sessions.db (files, timestamp, project)     ← Always runs
     ↓
-Summarizer extracts structured summary (local LLM)
-    ↓
-Summary written to markdown file
-    ↓
-Summary indexed in SQLite database (FTS5)
+(Optional) AI summarizer picks up unsummarized sessions         ← Cron, batched
+    ↓    ├─ Max 5 per run, lock file, 3-attempt cap
+    ↓    └─ Marks each session done so it's never reprocessed
     ↓
 Next session: --context query retrieves relevant history
 ```
 
+#### AI-Powered Summaries (Optional Enhancement)
+
+The basic pipeline captures metadata — file paths, timestamps, project names. Good enough to jog your memory, but thin. You can optionally add an LLM step (Claude Haiku, GPT-4o-mini, or a local model) to read transcripts and generate real summaries with decisions, issues, and context.
+
+The quality difference is significant. But so is the risk.
+
+**A cautionary tale**: The first version of this system tried to summarize every unprocessed session in one pass. When the API call failed, it retried the full batch. Then retried again. One runaway loop burned through a third of a week's token budget before anyone noticed. These safeguards exist because that happened.
+
+**If you add AI summarization, these are mandatory:**
+
+| Safeguard | Rule | Why |
+|-----------|------|-----|
+| **Batch limit** | Max 5 sessions per run | A backlog of 50 sessions drains over 10 cycles, not one catastrophic pass |
+| **Processed marker** | `summarized` flag in DB; never re-process a completed session | Prevents the retry-everything loop that kills budgets |
+| **Attempt cap** | 3 tries max, then mark as permanently failed | A session that fails 3 times will fail forever — stop wasting tokens on it |
+| **Lock file** | One summarizer instance at a time | Cron cycles can overlap; two simultaneous runs double-process everything |
+| **No retry loops** | On failure, log the error and move to the next session | The cron schedule IS your retry mechanism. Never loop inside a single run. |
+
+**Cost estimate**: ~$0.01-0.05 per session (Haiku/GPT-4o-mini), ~$0.10-0.50 per session (larger models). At 10 sessions/day, that's $3-15/month with a small model. Use the smallest model that gives you good-enough summaries.
+
 **Key implementation details:**
 - Deduplicate at capture time (same conversation = replace, don't append)
 - Skip tiny sessions (auto-generated, not real work)
-- Use a lock/queue for summarization if your LLM handles one request at a time
+- Use a lock file for summarization — never allow concurrent runs
 - Index both by project (auto-detected from file paths) and full-text
 - The context query should produce a compact briefing, not dump raw summaries
 
@@ -928,6 +946,11 @@ These are the things that make AI memory systems fail. Avoid them.
 **Problem**: Building the full 4-tier system with mining, consolidation, and specialists before you have any content.
 **Why it fails**: You don't know what you need until you've worked with the AI for a while.
 **Fix**: Start with Tier 1 + 2 only. Add Tier 3 when projects get complex. Add Tier 4 when you're searching for the same reference data repeatedly.
+
+### 8. Unbounded AI Summarization
+**Problem**: Using an LLM to summarize session transcripts without batch limits, processed markers, or retry caps. The summarizer tries to process all backlogged sessions at once, hits an API error, retries the full batch, and loops until your token budget is gone.
+**Why it fails**: One bad run can burn through a third of your weekly tokens. The feedback loop is invisible — by the time you notice, the damage is done.
+**Fix**: Hard cap of 5 sessions per run. A `summarized` flag so completed sessions are never reprocessed. Max 3 attempts before marking a session as permanently failed. A lock file to prevent overlapping runs. And critically: no retry loops inside a single run — let the cron schedule be your retry mechanism. See [Session Memory](#7-session-memory) for the full safeguard list.
 
 ---
 

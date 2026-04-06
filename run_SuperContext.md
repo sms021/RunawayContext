@@ -539,7 +539,114 @@ If sudo is not available, an alternative is to have each user run their own cron
 
 **If hooks fail or aren't supported**, fall back to the Constitution instruction. The AI should remind the user (or do it itself) at the end of significant sessions.
 
-### 4.5.4 — Verify
+### 4.5.4 — AI-Powered Session Summaries (Optional) [ASK]
+
+The basic capture scripts above log metadata — file paths, timestamps, project names. That's the breadcrumb layer. But the summaries are thin: "VS Code session (auto-captured)" doesn't tell you much when you come back a week later.
+
+You can get dramatically better summaries by having an LLM read the transcript and extract structured notes. The difference in quality is significant — you get real decisions, real context, real issues, not just file lists.
+
+**Ask the user:**
+> "The basic session logger captures file lists and timestamps. You can optionally use an AI model (like Claude Haiku) to generate richer summaries — actual descriptions of what was done, decisions made, and open issues. This costs tokens but produces much better session history. Want to set this up? (yes / no / later)"
+
+**If yes**, build the AI summarizer with the safeguards below. **If no**, skip to 4.5.5. The basic logger still works fine — they can always add this later.
+
+#### Why These Safeguards Are Non-Negotiable
+
+We learned this the hard way: the first version of this had no limits. It tried to summarize every unprocessed session in one pass, hit errors, retried the full batch, hit errors again, and burned through a third of a week's token budget in a single runaway loop. These safeguards aren't suggestions — they're scar tissue.
+
+#### Safeguard 1: Batch Limits
+
+**Never process more than 5 sessions per run.** If there's a backlog of 50 unsummarized sessions, that's 10 runs over 10 cron cycles — not one catastrophic pass.
+
+```python
+MAX_BATCH = 5  # Sessions per run. Not configurable. Not negotiable.
+
+unsummarized = get_unsummarized_sessions(limit=MAX_BATCH)
+for session in unsummarized:
+    summarize_one(session)
+```
+
+If the user has a massive backlog from initial setup, tell them to let it drain naturally over a few hours. Resist the urge to crank the limit up "just this once."
+
+#### Safeguard 2: Processed Markers
+
+Every session gets a `summarized` flag in the database. The summarizer only touches sessions where `summarized = 0`. Once processed (success OR permanent failure), mark it so it never enters the queue again.
+
+Add these columns to the `sessions` table:
+```sql
+ALTER TABLE sessions ADD COLUMN summarized INTEGER DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN summarize_attempts INTEGER DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN last_summarize_error TEXT;
+```
+
+Logic:
+- `summarized = 0, attempts < 3` → eligible for processing
+- `summarized = 0, attempts >= 3` → permanently failed, skip it (log a warning)
+- `summarized = 1` → done, never touch again
+
+#### Safeguard 3: Cooldown and Backoff
+
+If a summarization fails, don't immediately retry. Increment `summarize_attempts`, log the error, and move on to the next session. On the next cron run, it'll get another chance — but only if it hasn't hit 3 attempts.
+
+```python
+def summarize_one(session):
+    try:
+        summary = call_llm(session['full_transcript'])
+        update_session(session['id'], summary=summary, summarized=1)
+    except Exception as e:
+        increment_attempts(session['id'], error=str(e))
+        # Don't retry. Don't raise. Move on to the next one.
+```
+
+No retry loops inside a single run. Ever. The cron schedule IS your retry mechanism.
+
+#### Safeguard 4: Lock File
+
+Prevent overlapping runs. If the summarizer is already running (previous cron cycle still going), the new one exits immediately.
+
+```python
+import fcntl, sys
+
+lock_file = open('/tmp/supercontext_summarizer.lock', 'w')
+try:
+    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("Summarizer already running, skipping")
+    sys.exit(0)
+```
+
+#### Safeguard 5: Token Budget Awareness
+
+Warn the user about costs up front. A typical session transcript runs 10K-50K tokens. With Haiku, that's cheap. With a larger model, it adds up fast.
+
+In the Constitution or README, note:
+```
+AI Summarization: ~$0.01-0.05 per session (Haiku), ~$0.10-0.50 per session (Sonnet/GPT-4o-mini)
+Budget estimate: 10 sessions/day × 30 days = $3-15/month (Haiku) or $30-150/month (larger models)
+Use the smallest model that gives you good enough summaries. Haiku is usually plenty.
+```
+
+#### Implementation
+
+Create `_knowledge/summarize_sessions.py` that:
+1. Acquires lock file (exit if locked)
+2. Queries `SELECT * FROM sessions WHERE summarized = 0 AND summarize_attempts < 3 ORDER BY created_at LIMIT 5`
+3. For each session, reads the transcript and calls the LLM API
+4. On success: updates summary fields + sets `summarized = 1`
+5. On failure: increments `summarize_attempts`, logs error, continues to next
+6. Releases lock on exit
+
+**The LLM call** should use the cheapest model available. For Claude users, Haiku. For OpenAI users, GPT-4o-mini. The prompt is straightforward — pass the transcript and ask for the structured summary format from Phase 4.5.2.
+
+**Cron setup** (if the user opted for auto-logging in 4.5.3):
+```bash
+# Run summarizer every 15 minutes — offset from the watcher to avoid overlap
+(crontab -l 2>/dev/null; echo "7,22,37,52 * * * * cd $(pwd) && python3 _knowledge/summarize_sessions.py >> _knowledge/summarizer.log 2>&1") | crontab -
+```
+
+The 15-minute interval with a 5-session batch cap means worst case: 20 sessions/hour, 480/day. That's more than enough to keep up with even heavy usage, while making a runaway loop literally impossible.
+
+### 4.5.5 — Verify
 Run `python3 _knowledge/sessions.py --stats` to confirm the database was created. Then save a test entry:
 ```bash
 python3 _knowledge/sessions.py --save --project "SuperContext" --summary "Initial SuperContext setup" --work "Built 4-tier knowledge system" --decisions "SQLite for session storage, Level 1 markdown for knowledge store"
@@ -619,6 +726,7 @@ Session Memory:
   Database: [path to sessions.db]
   CLI: [path to sessions.py]
   Auto-logging: [hook configured / manual reminder in Constitution / not set up]
+  AI summaries: [configured with safeguards / skipped — using basic logger only]
   Test entry: [saved successfully / failed — reason]
 
 Migrated from existing files:
