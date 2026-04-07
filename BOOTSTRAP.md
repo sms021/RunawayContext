@@ -1,14 +1,14 @@
-# SuperContext: The Manual Walkthrough
+# RunawayContext: The Manual Walkthrough
 
-This is the "do it by hand" guide. If you want to understand what you're building and why before you build it, start here. If you'd rather have your AI assistant build it for you automatically, use `run_SuperContext.md` instead.
+This is the "do it by hand" guide. If you want to understand what you're building and why before you build it, start here. If you'd rather have your AI assistant build it for you automatically, use `run_RunawayContext.md` instead.
 
-The full technical reference is in `SUPERCONTEXT.md` — this walkthrough covers the same system in plain language.
+The full technical reference is in `RUNAWAYCONTEXT.md` — this walkthrough covers the same system in plain language.
 
 ---
 
 ## What You're Building
 
-Every AI conversation starts from zero. Your assistant doesn't remember what you worked on yesterday, what mistakes it made, or why you chose that database schema. SuperContext fixes that by giving the AI a structured set of files to read — a memory system that grows as you work.
+Every AI conversation starts from zero. Your assistant doesn't remember what you worked on yesterday, what mistakes it made, or why you chose that database schema. RunawayContext fixes that by giving the AI a structured set of files to read — a memory system that grows as you work.
 
 The trick is **not dumping everything into one file.** AI accuracy drops when context gets too long, and important instructions in the middle of large files get ignored. So we split knowledge into four tiers: small things load every time, big things load only when needed.
 
@@ -199,10 +199,10 @@ Five habits:
 
 ## What's Next
 
-- **Full reference**: `SUPERCONTEXT.md` has the complete technical details, templates, anti-patterns, and scaling advice
-- **Automated setup**: `run_SuperContext.md` is a paste-and-go executor — your AI reads it and builds the whole system for you
-- **Questions or feedback**: [github.com/sms021/SuperContext](https://github.com/sms021/SuperContext)
+- **Full reference**: `RUNAWAYCONTEXT.md` has the complete technical details, templates, anti-patterns, and scaling advice
+- **Automated setup**: `run_RunawayContext.md` is a paste-and-go executor — your AI reads it and builds the whole system for you
+- **Questions or feedback**: [github.com/sms021/RunawayContext](https://github.com/sms021/RunawayContext)
 
 ---
 
-*SuperContext v1.0 — Built from real-world experience across 1,500+ AI coding sessions.*
+*RunawayContext v1.1 — Built from real-world experience across 1,500+ AI coding sessions.*

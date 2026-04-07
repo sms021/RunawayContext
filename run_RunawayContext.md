@@ -1,15 +1,15 @@
-# run_SuperContext.md
+# run_RunawayContext.md
 # One-shot AI Memory System Builder
 #
 # USAGE: Paste this entire file into your AI assistant, or tell it:
-#   "Please read and execute run_SuperContext.md"
+#   "Please read and execute run_RunawayContext.md"
 #
-# REQUIRES: SUPERCONTEXT.md in the same directory (the theory/reference guide)
+# REQUIRES: RUNAWAYCONTEXT.md in the same directory (the theory/reference guide)
 # WORKS WITH: Claude Code, Cursor, GitHub Copilot, OpenAI Codex, Aider, or any AI with file access
 
 ---
 
-You are about to build a persistent, tiered knowledge system called **SuperContext**. The full theory and reference guide is in `SUPERCONTEXT.md` in this same directory — read it first to understand the architecture. Then execute the phases below in order.
+You are about to build a persistent, tiered knowledge system called **RunawayContext**. The full theory and reference guide is in `RUNAWAYCONTEXT.md` in this same directory — read it first to understand the architecture. Then execute the phases below in order.
 
 **Your job is to do the work, not explain the theory.** Be concise. Show progress, not lectures. Ask questions only when marked [ASK]. Everything else, just do it.
 
@@ -18,7 +18,7 @@ You are about to build a persistent, tiered knowledge system called **SuperConte
 ## PHASE 0: ORIENT
 
 ### 0.1 — Read the Guide
-Read `SUPERCONTEXT.md` from this directory. Do not summarize it back to me. Just confirm you've read it and move on.
+Read `RUNAWAYCONTEXT.md` from this directory. Do not summarize it back to me. Just confirm you've read it and move on.
 
 ### 0.2 — Detect My Environment [ASK]
 Ask me these questions **all at once** (this is setup, not a conversation):
@@ -131,9 +131,9 @@ Populate each from the knowledge artifacts found in Phase 1. Don't pad — only 
 
 ### 2.3 — Level 2: SQLite Knowledge Store
 1. Create a `_knowledge/` directory
-2. Create `_knowledge/setup_knowledge.py` using Template E from SUPERCONTEXT.md
+2. Create `_knowledge/setup_knowledge.py` using Template E from RUNAWAYCONTEXT.md
 3. Run it to create the database
-4. Create `_knowledge/knowledge.py` using Template F from SUPERCONTEXT.md
+4. Create `_knowledge/knowledge.py` using Template F from RUNAWAYCONTEXT.md
 5. Populate the database from Phase 1 findings:
    - Database schemas → `data_sources` table
    - Business rules from TODOs/comments → `business_rules` table
@@ -386,7 +386,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SESSIONS_PY="$SCRIPT_DIR/sessions.py"
 STATE_FILE="$SCRIPT_DIR/.watcher_state"
-LOCK_FILE="/tmp/supercontext_watcher.lock"
+LOCK_FILE="/tmp/runawaycontext_watcher.lock"
 
 # ===== CONFIGURE THESE =====
 # Add all users who use Claude Code via VS Code (home_dir:username pairs)
@@ -607,7 +607,7 @@ Prevent overlapping runs. If the summarizer is already running (previous cron cy
 ```python
 import fcntl, sys
 
-lock_file = open('/tmp/supercontext_summarizer.lock', 'w')
+lock_file = open('/tmp/runawaycontext_summarizer.lock', 'w')
 try:
     fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
@@ -649,7 +649,7 @@ The 15-minute interval with a 5-session batch cap means worst case: 20 sessions/
 ### 4.5.5 — Verify
 Run `python3 _knowledge/sessions.py --stats` to confirm the database was created. Then save a test entry:
 ```bash
-python3 _knowledge/sessions.py --save --project "SuperContext" --summary "Initial SuperContext setup" --work "Built 4-tier knowledge system" --decisions "SQLite for session storage, Level 1 markdown for knowledge store"
+python3 _knowledge/sessions.py --save --project "RunawayContext" --summary "Initial RunawayContext setup" --work "Built 4-tier knowledge system" --decisions "SQLite for session storage, Level 1 markdown for knowledge store"
 ```
 
 Run `--recent 1` to confirm it saved correctly.
@@ -661,7 +661,7 @@ Run `--recent 1` to confirm it saved correctly.
 This is the **last** thing built because it references everything else.
 
 ### 5.1 — Draft the Constitution
-Build the Constitution file using Template A from SUPERCONTEXT.md. Customize it with:
+Build the Constitution file using Template A from RUNAWAYCONTEXT.md. Customize it with:
 
 **From my answers:**
 - Project name and description (question 0.2.2-3)
@@ -699,7 +699,7 @@ If an existing instruction file was found in Phase 1.1:
 Show me a complete summary of everything built:
 
 ```
-SUPERCONTEXT BUILD COMPLETE
+RUNAWAYCONTEXT BUILD COMPLETE
 ============================
 
 Constitution (Tier 1):
@@ -781,7 +781,7 @@ Only delete if the user says yes. If they say no or skip, move on.
 Tell me:
 
 ```
-Your SuperContext memory system is live.
+Your RunawayContext memory system is live.
 
 → Restart this session (or start a new one) for the Constitution to take effect.
 → From now on, I'll automatically use your project brains when working in those directories.
@@ -800,7 +800,7 @@ To verify everything works:
 3. Navigate to a project and ask it to check the project brain
    → It should read the CLAUDE.md and know the project context
 4. Run: python3 _knowledge/sessions.py --recent 1
-   → Should show the SuperContext setup session
+   → Should show the RunawayContext setup session
 ```
 
 ---
@@ -813,5 +813,5 @@ To verify everything works:
 4. **If something fails, adapt.** Missing permissions? Use a different path. Can't create SQLite? Fall back to markdown. Tool doesn't support X? Find the closest equivalent.
 5. **Respect the line budgets.** The Constitution MUST stay under 200 lines. The Memory index MUST stay under 50 lines. These are hard limits, not suggestions.
 6. **Don't pad files with placeholders.** Empty sections with "TODO" or "Add content here" are worse than no section at all. Only create sections with real content.
-7. **The Knowledge Store setup scripts (Templates E and F) come from SUPERCONTEXT.md.** Read that file to get them. Do not fabricate your own versions — use those templates.
+7. **The Knowledge Store setup scripts (Templates E and F) come from RUNAWAYCONTEXT.md.** Read that file to get them. Do not fabricate your own versions — use those templates.
 8. **When classifying existing content for migration, err on the side of deleting.** If you're unsure whether something is useful, it probably isn't. The user can always re-add it. Bloat is the enemy.

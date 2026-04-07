@@ -1,8 +1,10 @@
-# SuperContext
+# RunawayContext
 
 **A universal framework for giving AI coding assistants persistent memory and project intelligence across sessions.**
 
-Stop re-explaining your codebase every conversation. SuperContext is a structured, tiered knowledge system that makes any AI coding assistant remember, learn, and get smarter over time.
+> **Formerly SuperContext.** Same system, new name — renamed to avoid conflicts with existing projects. If you found us through the old repo, you're in the right place.
+
+Stop re-explaining your codebase every conversation. RunawayContext is a structured, tiered knowledge system that makes any AI coding assistant remember, learn, and get smarter over time.
 
 ---
 
@@ -14,7 +16,7 @@ The common fix — one giant instruction file — creates its own problems. A 2,
 
 ## The Solution
 
-SuperContext takes the opposite approach — **small, focused files loaded only when relevant.** Your always-loaded Constitution stays under 200 lines. Project-specific knowledge loads only when you're working in that project. Deep reference data lives in a searchable database and is retrieved on demand. The result: minimal token overhead, fast context loading, and every piece of knowledge exactly where your AI needs it.
+RunawayContext takes the opposite approach — **small, focused files loaded only when relevant.** Your always-loaded Constitution stays under 200 lines. Project-specific knowledge loads only when you're working in that project. Deep reference data lives in a searchable database and is retrieved on demand. The result: minimal token overhead, fast context loading, and every piece of knowledge exactly where your AI needs it.
 
 It implements a **4-tier knowledge architecture** that mirrors how human experts organize information — from always-available muscle memory to deep reference material retrieved on demand:
 
@@ -31,16 +33,16 @@ Plus **Session Memory** — automatic logging of every conversation so your AI c
 
 | File | What It Does |
 |------|-------------|
-| [**SUPERCONTEXT.md**](SUPERCONTEXT.md) | The full theory and reference guide — 12 sections covering architecture, each tier in detail, session memory, tool-specific setup, scaling, and anti-patterns |
-| [**run_SuperContext.md**](run_SuperContext.md) | The executable prompt — hand this to your AI and say "run this." It discovers your projects, migrates existing content, builds all 4 tiers, sets up session logging, and produces a clean system. No manual steps. |
+| [**RUNAWAYCONTEXT.md**](RUNAWAYCONTEXT.md) | The full theory and reference guide — 12 sections covering architecture, each tier in detail, session memory, tool-specific setup, scaling, and anti-patterns |
+| [**run_RunawayContext.md**](run_RunawayContext.md) | The executable prompt — hand this to your AI and say "run this." It discovers your projects, migrates existing content, builds all 4 tiers, sets up session logging, and produces a clean system. No manual steps. |
 | [**BOOTSTRAP.md**](BOOTSTRAP.md) | The manual walkthrough — explains what each tier is, why it matters, and how to build it by hand. Read this if you want to understand the system before (or instead of) running the automated setup. |
 
 ## Quick Start
 
 ### Option A: Full Setup (Existing Projects)
-1. Copy `SUPERCONTEXT.md` and `run_SuperContext.md` into your project root
+1. Copy `RUNAWAYCONTEXT.md` and `run_RunawayContext.md` into your project root
 2. Open your AI coding tool (Claude Code, Cursor, Copilot, etc.)
-3. Tell it: *"Please read and execute run_SuperContext.md"*
+3. Tell it: *"Please read and execute run_RunawayContext.md"*
 4. Answer 4 questions about your setup
 5. The AI builds everything autonomously (~10 minutes)
 
@@ -61,7 +63,7 @@ Plus **Session Memory** — automatic logging of every conversation so your AI c
 
 ## How It Works
 
-The executable prompt (`run_SuperContext.md`) runs through 7 phases:
+The executable prompt (`run_RunawayContext.md`) runs through 7 phases:
 
 1. **Orient** — Detects your AI tool and asks about your setup
 2. **Discover** — Scans your codebase for existing config files, docs, and knowledge artifacts
@@ -90,7 +92,7 @@ This system was developed over hundreds of real-world sessions building construc
 - Industry practice (Manus context engineering, Spotify, OpenAI Codex)
 - Hard-won lessons from daily multi-project, multi-user AI workflows
 
-The full research findings and references are in [SUPERCONTEXT.md](SUPERCONTEXT.md).
+The full research findings and references are in [RUNAWAYCONTEXT.md](RUNAWAYCONTEXT.md).
 
 ## License
 
@@ -98,4 +100,4 @@ MIT — use it however you want.
 
 ---
 
-*Built by a construction company that accidentally got really good at AI infrastructure.*
+*Built by [Runaway Ideas](https://github.com/sms021) — a construction company that accidentally got really good at AI infrastructure.*

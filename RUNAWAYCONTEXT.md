@@ -1,7 +1,9 @@
-# SuperContext: A Universal AI Memory System
+# RunawayContext: A Universal AI Memory System
 ### Give Your AI Assistant a Brain That Grows
 
-*Version 1.0 — April 2026*
+*Version 1.1 — April 2026*
+
+> **Renamed from SuperContext.** If you found us through the old repo, you're in the right place. Same system, new name.
 
 ---
 
@@ -44,7 +46,7 @@ Every AI conversation starts with a **context window** — a limited amount of t
 
 **The fix is simple in concept**: give the AI files to read that contain what it needs to know. But the hard part is **what goes where** and **how much**. Too little context and the AI makes uninformed mistakes. Too much and it drowns — research shows AI accuracy drops when context exceeds ~32K tokens, with important instructions in the middle being ignored entirely (the "lost-in-the-middle" problem).
 
-**SuperContext solves this with tiers**:
+**RunawayContext solves this with tiers**:
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -597,7 +599,7 @@ For Claude Code specifically, the auto-memory system is already Tier 2. Just mak
 
 For teams or power users who want full cross-conversation search:
 
-1. **Capture**: Hook into session end events to save conversation transcripts
+1. **Capture**: Hook into session lifecycle events (exit, compaction, clear) to save conversation transcripts
 2. **Summarize**: Use a local or cheap LLM to generate structured summaries
 3. **Index**: Store summaries in a searchable database (SQLite + FTS5)
 4. **Retrieve**: Query past sessions by project, topic, date, or full-text search
@@ -668,11 +670,41 @@ Claude Code has the best native support for this system because CLAUDE.md and au
 - Or use MCP servers for native tool integration
 
 **Session Memory:**
-- Claude Code hooks (`Stop`, `PreCompact`) can trigger capture scripts
+- Claude Code has three hooks that matter for session capture. Use **all three** — each one protects against a different data loss scenario:
+
+| Hook | Event | What's at risk without it |
+|------|-------|--------------------------|
+| `PreCompact` | Before `/compact` or auto-compaction | Full transcript is compressed — raw detail before that point is lost forever |
+| `SessionEnd` (matcher: `"clear"`) | When user runs `/clear` | Everything before the clear is wiped — if the session continues, only post-clear work is captured |
+| `Stop` | Session exits normally | Final state of the conversation is never captured |
+
 - Configure in `.claude/settings.json` (note the nested `hooks` array — this exact structure is required):
 ```json
 {
   "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /path/to/capture-session.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /path/to/capture-session.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -687,11 +719,12 @@ Claude Code has the best native support for this system because CLAUDE.md and au
   }
 }
 ```
+- **Important**: Your capture script should handle deduplication — the same conversation may be captured multiple times (e.g., compaction then exit). Use the conversation ID as a key and replace, don't append.
 
 **Important — VS Code vs CLI:**
 - Claude Code hooks (`Stop`, `PreCompact`, etc.) **only fire in the CLI terminal version**
 - The **VS Code Claude extension does NOT fire hooks** — sessions will not be captured automatically
-- **Fix**: Set up a cron-based watcher script that runs every 10 minutes, scans `~/.claude/projects/` for new/changed conversation files, and logs them to your session database. The `run_SuperContext.md` executor includes a complete watcher script ready to install.
+- **Fix**: Set up a cron-based watcher script that runs every 10 minutes, scans `~/.claude/projects/` for new/changed conversation files, and logs them to your session database. The `run_RunawayContext.md` executor includes a complete watcher script ready to install.
 - If you have multiple users (some CLI, some VS Code), the cron watcher is the only reliable capture method
 
 **Multi-user file permissions (critical):**
@@ -866,9 +899,15 @@ This returns only the critical rules, terminology, and gotchas relevant to that 
 The full pipeline for automatic cross-conversation continuity:
 
 ```
-Session ends
+Session lifecycle event fires
     ↓
-Hook fires capture script
+    ├─ PreCompact: full transcript about to be compressed — capture NOW
+    ├─ SessionEnd (clear): conversation about to be wiped — capture NOW
+    └─ Stop: session ending normally — capture final state
+    ↓
+Capture script runs (same script for all three events)
+    ↓
+Deduplicate by conversation ID (replace, don't append)
     ↓
 Metadata logged to sessions.db (files, timestamp, project)     ← Always runs
     ↓
@@ -878,6 +917,8 @@ Metadata logged to sessions.db (files, timestamp, project)     ← Always runs
     ↓
 Next session: --context query retrieves relevant history
 ```
+
+**Why all three hooks matter**: A single long session might compact twice and then exit — that's three capture events. Without `PreCompact`, you lose the raw transcript from before each compaction. Without `SessionEnd`, a `/clear` mid-session silently drops everything. The capture script is the same for all three; deduplication by conversation ID prevents bloat.
 
 #### AI-Powered Summaries (Optional Enhancement)
 
@@ -1131,7 +1172,7 @@ type: [feedback | user | project | reference]
 ```python
 #!/usr/bin/env python3
 """
-SuperContext Knowledge Store — Setup Script
+RunawayContext Knowledge Store — Setup Script
 Creates the SQLite database with FTS5 full-text search.
 Run once: python3 setup_knowledge.py
 """
@@ -1313,7 +1354,7 @@ if __name__ == '__main__':
 ```python
 #!/usr/bin/env python3
 """
-SuperContext Knowledge Store — Query CLI
+RunawayContext Knowledge Store — Query CLI
 Usage:
   python3 knowledge.py --ask "your question"        # Natural language search
   python3 knowledge.py --term "ABC" --context "..."  # Disambiguate a term
@@ -1533,7 +1574,7 @@ def format_results(results, as_json=False):
     return "\n".join(output) if output else "No results found."
 
 def main():
-    parser = argparse.ArgumentParser(description='SuperContext Knowledge Store')
+    parser = argparse.ArgumentParser(description='RunawayContext Knowledge Store')
     parser.add_argument('--ask', help='Natural language search across all tables')
     parser.add_argument('--term', help='Look up a term/abbreviation')
     parser.add_argument('--context', dest='context_hint', help='Context hint for term disambiguation')
@@ -1602,7 +1643,7 @@ if __name__ == '__main__':
 
 ## Summary
 
-SuperContext is not a product — it's a **pattern**. The specific tools don't matter. What matters is:
+RunawayContext is not a product — it's a **pattern**. The specific tools don't matter. What matters is:
 
 1. **Tier your knowledge** — small always-loaded, big on-demand
 2. **Route correctly** — every fact has one home
@@ -1614,5 +1655,5 @@ The AI doesn't need to be smarter. It needs to **remember**. Give it a brain, an
 
 ---
 
-*SuperContext v1.0 — Developed from real-world use across 1,500+ AI coding sessions.*
+*RunawayContext v1.1 — Developed from real-world use across 1,500+ AI coding sessions.*
 *Built on research from: arXiv (Codified Context), Manus (Context Engineering), Mem0, OpenAI Codex, and the Claude Code community.*
