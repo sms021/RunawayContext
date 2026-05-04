@@ -113,82 +113,137 @@ Recommended setup:
 
 ## PHASE 2: BUILD THE KNOWLEDGE STORE (Tier 4)
 
-Build this FIRST because Tiers 1-3 will reference it. Skip this phase if the discovery report recommended "skip for now."
+Build this FIRST because Tier 3 (Project Briefs) is GENERATED FROM Tier 4 in v2 — there is no Tier 3 without Tier 4.
 
-### 2.1 — Choose Level
-- If I have **fewer than 20 knowledge items** total → Level 1 (markdown files in a `_knowledge/` directory)
-- If I have **20+ items OR databases/APIs** → Level 2 (SQLite + CLI)
+> **v1 vs v2 here:** v1 had a "Level 1: markdown files" option. v2 dropped it. There's only one level: SQLite + FTS5, in two files. The v2 schema and CLI are in this repo at `schema/` and `lib/`.
 
-### 2.2 — Level 1: Markdown Knowledge Store
-Create a `_knowledge/` directory with these files as needed:
-- `databases.md` — schemas, connection info, table descriptions, gotchas
-- `terminology.md` — abbreviations and their meanings with context
-- `api-reference.md` — external API documentation, endpoints, auth
-- `architecture.md` — system-level decisions and rationale
-- `tools.md` — internal tools, scripts, utilities
+### 2.1 — Schema Bootstrap (skip the optional level choice — there's one path)
 
-Populate each from the knowledge artifacts found in Phase 1. Don't pad — only include what was actually found.
+Run the schema bootstrap. This creates `~/_knowledge/knowledge.db` (curated KS) and `~/_knowledge/sessions.db` (conversation log):
 
-### 2.3 — Level 2: SQLite Knowledge Store
-1. Create a `_knowledge/` directory
-2. Create `_knowledge/setup_knowledge.py` using Template E from RUNAWAYCONTEXT.md
-3. Run it to create the database
-4. Create `_knowledge/knowledge.py` using Template F from RUNAWAYCONTEXT.md
-5. Populate the database from Phase 1 findings:
-   - Database schemas → `data_sources` table
-   - Business rules from TODOs/comments → `business_rules` table
-   - Abbreviations from the codebase → `terminology` table
-   - Internal tools/scripts → `tools` table
-6. Run `--stats` and show me the result
+```bash
+python3 lib/setup_db.py
+```
+
+If I want a custom location, I'll set `RC_KS_DIR` first:
+```bash
+RC_KS_DIR=/my/custom/path python3 lib/setup_db.py
+```
+
+Verify:
+```bash
+sqlite3 ~/_knowledge/knowledge.db '.tables'
+sqlite3 ~/_knowledge/sessions.db '.tables'
+```
+
+### 2.2 — Build the Canonical Slug Taxonomy
+
+Open `lib/_project_slugs.py`. From the discovery you did in Phase 1.2, populate the two structures:
+
+1. **`CANONICAL_PROJECT_SLUGS`** — one slug per project area you found. Lowercase, snake_case. Always include `'general'` for cross-cutting knowledge.
+2. **`PATH_TO_SLUG`** — map directory paths (relative to project root) to slugs. Longest-match wins.
+
+This is THE canonical list. Every write into the KS will be validated against it.
+
+Example (replace with what you actually discovered):
+```python
+CANONICAL_PROJECT_SLUGS = {
+    'general',
+    'frontend', 'api', 'data_pipeline', 'admin_tool',
+}
+PATH_TO_SLUG = {
+    'apps/frontend':     'frontend',
+    'apps/api':          'api',
+    'pipelines/etl':     'data_pipeline',
+    'tools/admin':       'admin_tool',
+}
+```
+
+### 2.3 — Populate the KS from Discovery
+
+For each knowledge artifact found in Phase 1, classify and insert:
+
+| Content Type | Destination | Command |
+|-------------|-------------|---------|
+| Database schema, table description | `knowledge_chunks` | `propose_knowledge.py --project <slug> --topic <slug> --title "..." --body "..."` |
+| API endpoint reference | `knowledge_chunks` | same as above, tag `--tags api` |
+| Business rule (current discipline) | `knowledge_chunks` | same as above, tag `--tags rule` |
+| Abbreviation / terminology | `knowledge_chunks` (topic prefix `term_`) | same as above |
+| Internal tool / script | `knowledge_chunks` (topic prefix `tool_`) | same as above |
+| Burned-us incident with a fix | `lessons_learned` | `ll_brief.py --log-lesson --ll-projects <slug> --ll-title "..." --ll-what-happened "..." --ll-prevention "..."` |
+| Generic advice the AI already knows | DELETE — don't migrate | — |
+| Outdated information | DELETE | — |
+
+Every command requires a `--project` slug. The CLI will reject typos and untagged content.
 
 ### 2.4 — Import Existing Instruction File Content
-If existing instruction files were found in Phase 1.1, classify every piece of content in them:
 
-| Content Type | Destination |
-|-------------|-------------|
-| User preferences / behavioral rules | → Tier 1 (Constitution) |
-| Corrections / gotchas / "never do X" | → Tier 2 (Living Memory) |
-| Project-specific business rules | → Tier 3 (that project's brain) |
-| Database schemas, API docs, reference data | → Tier 4 (Knowledge Store) |
-| Generic advice the AI already knows | → DELETE (don't migrate) |
-| Outdated information | → DELETE |
+If existing instruction files were found in Phase 1.1, classify every piece of content in them using the table above. **Do the classification silently.** You'll use the results in the next phases.
 
-**Do the classification silently.** You'll use the results in the next phases.
+For content that maps to Tier 1 (preferences) or Tier 2 (gotchas), hold onto it — Phases 4 and 5 will use it. For Tier 3/4 content, route into the KS now via the commands in 2.3.
+
+### 2.5 — Report [SHOW ME]
+
+```bash
+python3 lib/ll_brief.py --list-projects     # (will be empty until briefs are built in Phase 3)
+sqlite3 ~/_knowledge/knowledge.db 'SELECT COUNT(*) FROM knowledge_chunks'
+sqlite3 ~/_knowledge/knowledge.db 'SELECT COUNT(*) FROM lessons_learned'
+```
+
+Show me the counts.
 
 ---
 
-## PHASE 3: BUILD PROJECT BRAINS (Tier 3)
+## PHASE 3: BUILD PROJECT BRIEFS (Tier 3 — auto-generated)
 
-Create one Project Brain file for each project/area identified in Phase 1.2.
+> **v2 — this phase is mostly automatic.** In v1 you hand-wrote project brains. In v2 the brief is regenerated from the DB. All you do here is rebuild the cards and write the files.
 
-### 3.1 — For Each Project
-Create the Project Brain file (using the correct filename for my AI tool) with these sections. Only include sections that have real content — don't create empty sections with placeholder text.
+### 3.1 — For Each Project Slug, Rebuild the Card
 
-**Required sections:**
-- **Overview** — 2-3 sentences from what you learned scanning the code
-- **Key Files** — table of important files and their purposes (scan the directory, pick the 5-15 most important)
+For every slug in `CANONICAL_PROJECT_SLUGS` (except `'general'`):
 
-**Include if applicable:**
-- **Data Architecture** — if the project uses databases or APIs
-- **Business Rules** — any domain logic found in comments, tests, or existing docs
-- **Known Gotchas** — from TODO/FIXME/HACK comments and existing instruction files
-- **Decision Log** — if any architectural decisions are documented in comments or existing files
-
-**Always include (even if empty):**
-- **Changelog** — empty section with a comment: `<!-- Update this at the end of each work session -->`
-
-### 3.2 — Migrate Content from Existing Files
-Move project-specific content identified in Phase 2.4 into the correct Project Brain. Remove it from the source file.
-
-### 3.3 — Report [SHOW ME]
-List every Project Brain file created, with line count and sections included. Example:
+```bash
+python3 lib/ll_brief.py --rebuild-brief <slug>
 ```
-PROJECT BRAINS CREATED
-======================
-  src/auth/CLAUDE.md (47 lines) — Overview, Key Files, Business Rules, Changelog
-  src/api/CLAUDE.md (82 lines) — Overview, Key Files, Data Architecture, API Endpoints, Gotchas, Changelog
-  tools/printer/CLAUDE.md (35 lines) — Overview, Key Files, Changelog
+
+This walks every `lessons_learned` and `knowledge_chunks` row tagged with that slug and updates the `project_context_card` row.
+
+### 3.2 — Set the `md_path` and Overview for Each Card
+
+For each project, decide where the auto-generated CLAUDE.md goes (use the correct filename for my AI tool from Phase 0.3):
+
+```bash
+sqlite3 ~/_knowledge/knowledge.db "UPDATE project_context_card SET
+  title = 'Frontend',
+  overview = '2-5 line human-curated overview of what this project does, who owns it, why it exists. This is the PRESERVE block content.',
+  md_path = '/path/to/frontend/CLAUDE.md',
+  md_line_cap = 150
+  WHERE project_slug = 'frontend'"
 ```
+
+Repeat per slug. The `overview` field is the PRESERVE block — write it once, in 2-5 lines, and it survives every regen. Everything else regenerates.
+
+### 3.3 — Generate the Files
+
+```bash
+for slug in $(sqlite3 ~/_knowledge/knowledge.db "SELECT project_slug FROM project_context_card WHERE md_path IS NOT NULL"); do
+    python3 lib/ll_brief.py --rebuild-md "$slug"
+done
+```
+
+Each command writes a slim auto-generated CLAUDE.md (or equivalent) at the registered `md_path`.
+
+### 3.4 — Report [SHOW ME]
+
+```
+PROJECT BRIEFS GENERATED
+========================
+  /path/to/frontend/CLAUDE.md     (47 lines)  slug=frontend
+  /path/to/api/CLAUDE.md          (82 lines)  slug=api
+  /path/to/data_pipeline/CLAUDE.md (35 lines) slug=data_pipeline
+```
+
+If any brief is at the cap (150 lines), tell me — that means the slug has too much content and may need to be split.
 
 ---
 
@@ -695,73 +750,112 @@ If an existing instruction file was found in Phase 1.1:
 
 ## PHASE 6: VERIFY & ACTIVATE
 
-### 6.1 — Final Report [SHOW ME]
+### 6.1 — Wire Up Drift Detection (v2)
+
+Before the final report, install the drift detector. Two options depending on the AI tool:
+
+**If Claude Code CLI** — add to `~/.claude/settings.json`:
+```bash
+python3 -c "
+import json, os
+p = os.path.expanduser('~/.claude/settings.json')
+data = json.load(open(p)) if os.path.exists(p) else {}
+hooks = data.setdefault('hooks', {})
+stops = hooks.setdefault('Stop', [])
+cmd = '$PWD/bin/check_md_drift.sh'
+already = any(any(h.get('command','').endswith('check_md_drift.sh') for h in s.get('hooks', [])) for s in stops)
+if not already:
+    stops.append({'hooks':[{'type':'command','command': cmd}]})
+    open(p,'w').write(json.dumps(data, indent=2))
+    print(f'Stop hook added to {p}')
+else:
+    print('Stop hook already present')
+"
+```
+
+**If VS Code Claude extension or any tool that doesn't fire Stop hooks** — add the cron / launchd watcher:
+
+Linux:
+```bash
+(crontab -l 2>/dev/null; echo "*/10 * * * * $PWD/bin/md_drift_watcher.sh") | crontab -
+```
+
+macOS: see `bin/md_drift_watcher.sh` for the launchd plist template.
+
+### 6.2 — Final Report [SHOW ME]
 Show me a complete summary of everything built:
 
 ```
-RUNAWAYCONTEXT BUILD COMPLETE
-============================
+RUNAWAYCONTEXT v2 BUILD COMPLETE
+================================
+
+Knowledge Store (Tier 4):
+  knowledge.db: [path] — [chunks] chunks, [lessons] lessons, [cards] briefs
+  sessions.db:  [path] — [N] sessions logged
+
+Project Briefs (Tier 3, auto-generated):
+  [count] briefs generated:
+  - [md_path] ([lines] lines, cap [cap]) ← slug
+  - ...
+
+Slug taxonomy:
+  CANONICAL_PROJECT_SLUGS: [count] slugs registered
+  Edit at: lib/_project_slugs.py
+
+Living Memory (Tier 2):
+  Index: [path] ([count] lines)
+  Pointer style: LL#N / KS#N
 
 Constitution (Tier 1):
   File: [path]
   Lines: [count] (target: ≤200)
 
-Living Memory (Tier 2):
-  Index: [path] ([count] lines, [count] entries)
-  Detail files: [count]
+Drift detection:
+  Stop hook: [installed / N/A — VS Code]
+  Cron watcher: [installed / not needed — Stop hook covers it]
+  Watcher log: [path]
 
-Project Brains (Tier 3):
-  [count] project files created:
-  - [path] ([lines] lines)
-  - [path] ([lines] lines)
-  ...
-
-Knowledge Store (Tier 4):
-  Type: [Level 1 markdown / Level 2 SQLite / not created]
-  Location: [path]
-  [If SQLite: entries by table - metrics: X, data_sources: X, business_rules: X, terminology: X, tools: X]
-  [If markdown: file count and total lines]
-
-Session Memory:
-  Database: [path to sessions.db]
-  CLI: [path to sessions.py]
-  Auto-logging: [hook configured / manual reminder in Constitution / not set up]
-  AI summaries: [configured with safeguards / skipped — using basic logger only]
-  Test entry: [saved successfully / failed — reason]
+Session capture:
+  PostCompact hook: [configured / manual reminder]
 
 Migrated from existing files:
-  - [old filename]: [X] items moved to Tier 1, [X] to Tier 2, [X] to Tier 3, [X] to Tier 4, [X] deleted
-
-Files to clean up:
-  - [any old instruction files that were replaced]
+  - [old filename]: [X] chunks, [X] lessons, [X] kept in Tier 1, [X] deleted
 ```
 
-### 6.2 — Teach Me the Habits [SHOW ME]
+### 6.3 — Teach Me the Habits [SHOW ME]
 Show me this cheat sheet:
 
 ```
-KEEPING YOUR AI MEMORY ALIVE
-==============================
+KEEPING YOUR AI MEMORY ALIVE (v2)
+==================================
 
-1. CORRECT ME     → When I get something wrong, say "remember: [the correction]"
-                    I'll save it to Living Memory so I never repeat the mistake.
+1. CORRECT ME     → When I get something wrong, run:
+                    python3 lib/ll_brief.py --log-lesson \
+                        --ll-projects <slug> --ll-title "..." \
+                        --ll-prevention "the do/don't rule"
+                    The brief auto-rebuilds. The lesson is searchable forever.
 
-2. LOG SESSIONS   → When we finish significant work, say "log this session"
-                    I'll save a summary to the session database so future sessions
-                    know what happened. (If hooks are set up, this happens automatically.)
+2. LOG REFERENCE  → When we discover stable knowledge worth keeping, run:
+                    python3 lib/propose_knowledge.py --project <slug> \
+                        --topic <slug> --title "..." --body "..."
+                    Lessons are scar tissue (incidents). Chunks are reference (current state).
 
-3. START SESSIONS → When you come back to a project after a break, say
-                    "check what we've done on [project name] recently"
-                    I'll pull up context from both the project brain AND session history.
+3. QUERY FIRST    → When entering a project, ALWAYS run first:
+                    python3 lib/ll_brief.py --brief <slug>
+                    This returns the manifest. Drill via --ll-get N or --rules.
 
-4. UPDATE BRAINS  → When we finish significant work, say "update the project brain"
-                    I'll add a changelog entry and update any stale sections.
+4. DON'T HAND-EDIT BRIEFS → If you find yourself opening a project's CLAUDE.md
+                    to "add a note", STOP. Use --log-lesson or propose_knowledge.py
+                    instead. Hand-edits outside the PRESERVE block get wiped.
 
-5. STAY SLIM      → If the Constitution passes 200 lines, tell me to slim it down.
-                    I'll move the excess to the correct lower tier.
+5. WATCH FOR DRIFT → The Stop hook / cron watcher tells you when a brief grows
+                    past its cap. When that happens, regen:
+                    python3 lib/ll_brief.py --rebuild-md <slug>
 
-6. MONTHLY CLEAN  → Once a month, say "review the memory system"
-                    I'll prune stale entries, check for duplicates, and flag drift.
+6. SUPERSEDE, DON'T DELETE → When a lesson no longer applies, mark it:
+                    UPDATE lessons_learned SET status='superseded',
+                      superseded_by=<new_id> WHERE id=<old_id>;
+                    Brief auto-drops it on next rebuild. History is preserved.
 ```
 
 ### 6.3 — Clean Up Legacy Files [ASK]

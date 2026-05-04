@@ -1,7 +1,17 @@
 # RunawayContext: A Universal AI Memory System
 ### Give Your AI Assistant a Brain That Grows
 
-*Version 1.1 — April 2026*
+*Version 2.0 — May 2026*
+
+> **What's new in v2** (full migration notes in [CHANGELOG.md](CHANGELOG.md)):
+> - Tier 3 (Project Briefs) is now **auto-generated** from the database, not hand-edited. Hand-edits outside a small PRESERVE block are wiped on next regen.
+> - Every write into the Knowledge Store **requires a project slug** validated against a canonical list. Typos and untagged content are rejected at the CLI.
+> - A **drift detector** (Stop hook + cron / launchd watcher) surfaces any project brief that grows past its line cap.
+> - Knowledge Store is now **two SQLite files** — `knowledge.db` (curated, small, frequently backed up) and `sessions.db` (heavy transcripts, retained longer). Linked via `conversation_id` and ATTACH at query time.
+> - **Lessons learned** gain `severity`, `status`, and `superseded_by` for graceful lifecycle.
+> - **`project_context_card`** — a new manifest layer your AI queries first when entering a project. One row per project, auto-rebuilt from any tagged source row.
+>
+> v1 users: see [Section 13: v1 → v2 Upgrade](#13-v1--v2-upgrade). v2 is additive — no destructive changes.
 
 > **Renamed from SuperContext.** If you found us through the old repo, you're in the right place. Same system, new name.
 
@@ -16,10 +26,13 @@ This is a step-by-step guide to building a **persistent, tiered knowledge system
 - Route different types of knowledge to the right place at the right depth
 - Get smarter over time as it accumulates experience with your codebase
 - Avoid repeating mistakes it (or you) already solved
+- **(v2)** Stop drifting back into the giant-instruction-file shape it's trying to escape
 
-This system was developed over hundreds of real-world sessions building construction management software. It draws on research from academic papers, open-source projects (Mem0, OpenMemory, Brain-Agent), industry practice (Manus, Spotify, OpenAI Codex), and hard-won lessons from daily use.
+This system was developed over hundreds of real-world sessions building construction management software. v2's enforcement-first design came from watching v1's policy-only constraints quietly drift over six months of use — the fix was to put the discipline into the schema, the CLI write guards, and a drift detector, not into a "be careful" line in the docs.
 
-**It works with**: Claude Code, Cursor, GitHub Copilot, OpenAI Codex CLI, Aider, Windsurf, or any AI that reads instruction files. The core principles are tool-agnostic.
+It draws on research from academic papers, open-source projects (Mem0, OpenMemory, Brain-Agent), industry practice (Manus, Spotify, OpenAI Codex), and hard-won lessons from daily use.
+
+**It works with**: Claude Code, Cursor, GitHub Copilot, OpenAI Codex CLI, Aider, Windsurf, or any AI that reads instruction files. The core principles are tool-agnostic. v2 adds optional Stop hook + cron watcher integration for tools that support them.
 
 ---
 
@@ -29,14 +42,18 @@ This system was developed over hundreds of real-world sessions building construc
 2. [Architecture Overview](#2-architecture-overview)
 3. [Tier 1: The Constitution](#3-tier-1-the-constitution) — Always-loaded global instructions
 4. [Tier 2: Living Memory](#4-tier-2-living-memory) — Cross-session behavioral learning
-5. [Tier 3: Project Brains](#5-tier-3-project-brains) — Deep per-project knowledge
-6. [Tier 4: The Knowledge Store](#6-tier-4-the-knowledge-store) — Searchable reference database
+5. [Tier 3: Project Briefs](#5-tier-3-project-briefs) — Auto-generated per-project knowledge ⚡ v2
+6. [Tier 4: The Knowledge Store](#6-tier-4-the-knowledge-store) — `knowledge.db` + `sessions.db` ⚡ v2
 7. [Session Memory](#7-session-memory) — Cross-conversation continuity
 8. [Tool-Specific Setup](#8-tool-specific-setup) — Claude Code, Cursor, Copilot, Codex, Aider
 9. [Scaling Up](#9-scaling-up) — Specialists, auto-mining, consolidation
 10. [Anti-Patterns](#10-anti-patterns) — What NOT to do
 11. [Quick Start](#11-quick-start) — Get running in 15 minutes
 12. [Templates](#12-templates) — Copy-paste starter files
+13. [v1 → v2 Upgrade](#13-v1--v2-upgrade) — Migration recipe ⚡ v2
+14. [Write Guards](#14-write-guards-v2) — Project tagging, slug validation, source attribution ⚡ v2
+15. [Drift Detection](#15-drift-detection-v2) — Stop hook, cron watcher, snapshot file ⚡ v2
+16. [Multi-User Setup](#16-multi-user-setup-v2) — Shared hosts, Stop hook rollout ⚡ v2
 
 ---
 
@@ -308,13 +325,17 @@ Review Living Memory monthly:
 
 ---
 
-## 5. Tier 3: Project Brains
+## 5. Tier 3: Project Briefs
 
-Project Brains are the workhorses of the system. Each project (or major feature area) gets its own instruction file containing everything the AI needs to work effectively in that context.
+Project Briefs are the workhorses of the system. Each project (or major feature area) gets its own instruction file containing everything the AI needs to work effectively in that context.
+
+> **v2 architectural change.** Tier 3 in v1 was a hand-edited markdown file you maintained over time. v2 makes it a **generated artifact** rebuilt from `knowledge.db` on demand. The file you see in your project directory is auto-written; only a small `<!-- PRESERVE_START --> ... <!-- PRESERVE_END -->` block survives regeneration. This is the v2 fix for the slow drift back into 2,000-line files.
+>
+> The conceptual content below — what should be in a project brief — still applies. The change is **where it lives** (DB rows tagged with the project slug) and **how it gets into the file** (via `--rebuild-md`, not by hand).
 
 ### Where They Live
 
-One file per project directory:
+One file per project directory. The file path is registered in `project_context_card.md_path`:
 
 | Tool | File |
 |------|------|
@@ -324,9 +345,84 @@ One file per project directory:
 | OpenAI Codex | `AGENTS.md` in the project subdirectory |
 | Any tool | `PROJECT_CONTEXT.md` or equivalent in the project directory |
 
-### What Goes In a Project Brain
+### How v2 Generates Them
 
-A Project Brain should answer the question: **"If a competent developer sat down to work on this project for the first time, what would they need to know that isn't obvious from reading the code?"**
+```
+                         ┌──────────────────────┐
+                         │  knowledge.db        │
+                         │  ┌────────────────┐  │
+   tag rows with the     │  │ lessons_learned│  │     project_context_card row
+   project slug          │  │ (project_tags) │  │     is the manifest
+   ─────────────────────▶│  └────────────────┘  │
+                         │  ┌────────────────┐  │     ┌──────────────────────┐
+                         │  │ knowledge_chunks│ │ ──▶ │ project_context_card │
+                         │  │ (project_tags) │  │     │  - top_warnings      │
+                         │  └────────────────┘  │     │  - active_lesson_ids │
+                         └──────────────────────┘     │  - active_chunk_ids  │
+                                                       │  - md_path / cap     │
+                                                       └──────────┬───────────┘
+                                                                  │
+                                                       ─rebuild-md┴ ──▶  CLAUDE.md
+                                                                          (≤150 lines,
+                                                                           PRESERVE block,
+                                                                           regen banner)
+```
+
+**The flow:**
+1. **Tag content** with the project's slug. Lessons via `--log-lesson --ll-projects <slug>`. Chunks via `propose_knowledge.py --project <slug>`.
+2. **Rebuild the manifest**: `python3 lib/ll_brief.py --rebuild-brief <slug>`. This walks every tagged row and updates the `project_context_card` row.
+3. **Regen the markdown file**: `python3 lib/ll_brief.py --rebuild-md <slug>`. Reads the card, writes a slim file at `card.md_path`.
+4. **Read the brief** as your AI's first action: `python3 lib/ll_brief.py --brief <slug>` returns the manifest in stdout — no file read required.
+
+### What Goes In a Project Brief (the generated file)
+
+The regenerator emits a fixed structure. You don't need to maintain it; you just feed the DB:
+
+```markdown
+<!-- AUTO-GENERATED — DO NOT HAND-EDIT.
+This file is regenerated from knowledge.db / project_context_card.
+... -->
+
+<!-- PRESERVE_START -->
+## Project Name
+
+5-10 line human-curated overview. Edit ONLY here. Survives every regen.
+<!-- PRESERVE_END -->
+
+## ⚠ Top Warnings (read first)
+- **LL#42**: <critical-severity lesson title>
+- **LL#13**: <critical-severity lesson title>
+
+## Lessons Learned (8)
+- LL#42 — <title>
+- LL#13 — <title>
+- ...
+
+## Knowledge Chunks (15)
+- KS#101 — <title>
+- ...
+
+---
+_Brief regenerated 2026-05-04 12:25 UTC. Project slug: `myapp`._
+```
+
+The PRESERVE block answers: **"If a competent developer sat down to work on this project for the first time, what would they need to know that isn't obvious from reading the code?"** — but in 5-10 lines, not 500. The body of the brief is just pointers (`LL#N`, `KS#N`) the AI can drill into.
+
+### Where the Old "Sections" Live in v2
+
+If you used v1 and had a brief with multiple sections (Data Architecture / Key Files / Business Rules / Database Schema / Known Gotchas / Decision Log / Changelog), here's where each maps:
+
+| v1 section | v2 home |
+|-----------|---------|
+| Overview | PRESERVE block in the generated brief |
+| Data Architecture / Database Schema | `knowledge_chunks` (one chunk per table or schema) |
+| Key Files | `knowledge_chunks` (one chunk per file group) — or skip; `find` answers this |
+| Business Rules | `knowledge_chunks` (one chunk per rule), or `lessons_learned` if it came from a burned-us incident |
+| Known Gotchas | `lessons_learned` (this is exactly what LL is for) |
+| Decision Log | `knowledge_chunks` (one chunk per decision, or one per `decision_log` topic) |
+| Changelog | `lessons_learned` for fixes; `knowledge_chunks` for stable feature notes; `sessions.db` for the timeline |
+
+Don't try to reconstruct a v1 brief in v2 syntax. Migrate the *content* to DB rows; let the regenerator render the new file.
 
 #### Recommended Sections
 
@@ -407,15 +503,19 @@ This cannot be overstated. The changelog, written in a **problem → root cause 
 
 ### Auto-Updating
 
-**Update the Project Brain at the end of every significant work session.** This is not optional — it's what keeps the system alive. Most AI tools can be instructed to do this automatically. Add this to your Constitution:
+In v1, you (or your AI) hand-edited the project brain at end-of-session. v2 inverts this — you log knowledge to the DB, and the brief auto-rebuilds.
+
+**Add to your Constitution:**
 
 ```markdown
-## Project Brain Protocol
-- When finishing significant work in a project, update its CLAUDE.md:
-  - Add changelog entry for what was done
-  - Update any sections that are now stale
-  - Add gotchas if new edge cases were discovered
-  - Do this automatically — don't ask permission
+## Project Brief Protocol (v2)
+- When finishing significant work in a project, log new knowledge to the DB:
+  - Burned-us incident → `python3 lib/ll_brief.py --log-lesson --ll-projects <slug> ...`
+  - Stable rule / data fact → `python3 lib/propose_knowledge.py --project <slug> ...`
+  - The brief auto-rebuilds. Don't hand-edit the project's CLAUDE.md.
+- When entering a project, ALWAYS first run:
+  - `python3 lib/ll_brief.py --brief <slug>`
+  - This returns the manifest. From there, drill via --ll-get N or --rules.
 ```
 
 ---
@@ -424,36 +524,46 @@ This cannot be overstated. The changelog, written in a **problem → root cause 
 
 The Knowledge Store is your deep reference library. It holds everything that's too detailed or too broad for the other tiers — full database schemas, terminology disambiguation, metrics definitions, infrastructure configs, tool registries.
 
-### Complexity Levels
+> **v2 architectural change.** Tier 4 is now **two SQLite files**, not one or a markdown directory:
+>
+> ```
+> ~/_knowledge/
+> ├── knowledge.db    ← curated, small, frequently backed up (chunks, lessons,
+> │                     project_context_card, junctions)
+> └── sessions.db     ← heavy, append-only (conversation transcripts, summaries)
+> ```
+>
+> v1 had a single `sessions.db` for everything. v2 splits the curated KS from the heavy session log because they have different lifecycles (KS is curated and frequently backed up; sessions are append-only and heavy). Linked via `conversation_id` (TEXT) — `lessons_learned.source_conversation_ref` and `chunk_sessions.conversation_id` point at `session_logs.conversation_id`. ATTACH the other DB at query time when you need them joined.
+>
+> v2 also drops the "markdown files" complexity level. SQLite + FTS5 is now the only level. The schema is well under 200 lines of SQL, the migrations are idempotent, and `setup_db.py` makes installation a one-liner. The cost of "Level 1: organized markdown" was that everything else (project briefs, write guards, drift detection) had to be retrofitted to handle both modes; v2 picks one and goes deep.
 
-You can implement the Knowledge Store at three complexity levels. Start simple and scale up as needed.
+### Complexity Levels (v2)
 
-#### Level 1: Organized Markdown Files (Simplest)
+There's one level. Use it.
 
-Create a `_knowledge/` directory with categorized markdown files:
-
-```
-_knowledge/
-├── databases.md        # Connection strings, schema summaries
-├── terminology.md      # Abbreviation disambiguation
-├── api-reference.md    # External API documentation
-├── architecture.md     # System architecture decisions
-└── tools.md           # Internal tool registry
-```
-
-**In your Constitution, add:**
-```markdown
-## Knowledge Store
-Deep reference files are in `_knowledge/`. Search there when you need:
-- Database schemas or connection info → `_knowledge/databases.md`
-- Abbreviation meanings → `_knowledge/terminology.md`
-- API documentation → `_knowledge/api-reference.md`
+```bash
+python3 lib/setup_db.py             # creates both DBs
+python3 lib/setup_db.py --no-sessions  # KS only, no session capture
 ```
 
-**Pros**: Zero setup, works with any tool, easy to edit.
-**Cons**: No search, AI must read entire files, doesn't scale past ~20 files.
+This creates:
 
-#### Level 2: SQLite + CLI Script (Recommended)
+| Database | Tables |
+|----------|--------|
+| `knowledge.db` | `knowledge_chunks` (+ FTS5), `lessons_learned` (+ FTS5), `project_context_card`, `lesson_chunks`, `chunk_sessions` |
+| `sessions.db` | `session_logs` (+ FTS5) |
+
+#### What was Level 1: Organized Markdown Files (deprecated)
+
+In v1, you could opt into a `_knowledge/` directory of markdown files instead of a SQLite database. We dropped this for v2 because:
+- It can't support the project_context_card auto-generation
+- It can't support write guards (typos slip in too easily)
+- It can't support FTS5 search at any meaningful scale
+- The cost of supporting two paths everywhere wasn't worth saving the SQLite install
+
+If you really want the simpler approach, you can keep markdown files alongside the database and search them with grep — but the rest of v2's tooling won't help you with them.
+
+#### What was Level 2: SQLite + CLI Script (now the default)
 
 A SQLite database with a Python/bash CLI that the AI can query:
 
@@ -1641,6 +1751,202 @@ if __name__ == '__main__':
 
 ---
 
+## 13. v1 → v2 Upgrade
+
+If you already have a v1 RunawayContext install, your `~/_knowledge/sessions.db` is a single file containing `knowledge_chunks`, `lessons_learned`, `sessions`, and the junctions. v2 splits this into two files (`knowledge.db` + `sessions.db`), adds new columns, and introduces new tables (`project_context_card`, junction renames). All existing rows are preserved.
+
+**Recipe:**
+
+```bash
+# 1. Back up first (the migrator also backs up — be paranoid)
+cp ~/_knowledge/sessions.db ~/_knowledge/sessions.db.manual.bak
+
+# 2. Run the migrator (it does not touch the original)
+python3 lib/migrate_v1_to_v2.py --v1-db ~/_knowledge/sessions.db
+```
+
+**What the migrator does:**
+1. Backs up the v1 file to `sessions.db.v1.bak` next to it.
+2. Lifts `knowledge_chunks` + `lessons_learned` into a new `knowledge.db`.
+3. Creates a new `sessions.db` with `session_logs` (the v1 `sessions` table renamed).
+4. Applies v2 schema migrations to both DBs (adds `severity`, `status`, `slug`, `what_happened`, `why`, `the_fix`, `prevention_rule`, `project_tags`, etc. on lessons; creates `project_context_card`, `lesson_chunks`, `chunk_sessions` junctions).
+5. Backfills v1 `project` → `project_tags`, v1 `lesson` → `prevention_rule`, v1 `context` → `what_happened`.
+6. Verifies row counts on both sides.
+
+**What you do after the migrator runs:**
+1. Edit `lib/_project_slugs.py` — add your project slugs to `CANONICAL_PROJECT_SLUGS` and path mappings to `PATH_TO_SLUG`.
+2. Run `python3 lib/ll_brief.py --rebuild-brief <slug>` for each project. This builds the new `project_context_card` rows from your existing tagged content.
+3. Set `md_path` on each card so the regenerator knows where to write the slim brief.
+4. Run `python3 lib/ll_brief.py --rebuild-md <slug>` to write the auto-generated Tier 3 file. Your existing project CLAUDE.md is overwritten — the original v1 file is in your shell's git history, and its content was already migrated to KS rows.
+5. Wire up the drift detector ([Section 15](#15-drift-detection-v2)).
+
+**Distinction: v1 → v2 vs fresh install.** The migrator is ONLY for existing v1 users. For new installs, run `run_RunawayContext.md` instead — it scrapes your existing READMEs / AI notes / config files / project docs and builds the KS from those sources. Don't run the migrator on a fresh install.
+
+---
+
+## 14. Write Guards (v2)
+
+In v1, anyone with a Python REPL could insert a row into `knowledge_chunks` or `lessons_learned` with no project tag and no source attribution. Over time, untagged content accumulated, and queries-by-project missed it. v2 closes this at the write side.
+
+**Three guards apply to every write:**
+
+### 14.1 Required `--project` slug
+
+Every CLI write requires `--project` (or `--ll-projects` for lessons). Argparse rejects the call before touching the DB:
+
+```bash
+$ python3 lib/propose_knowledge.py --topic auth --title "Auth" --body "..."
+propose_knowledge.py: error: the following arguments are required: --project
+```
+
+Same for `--log-lesson`. There's no "I'll tag it later" option.
+
+### 14.2 Canonical slug validation
+
+The slug must match an entry in `CANONICAL_PROJECT_SLUGS` in `lib/_project_slugs.py`:
+
+```bash
+$ python3 lib/propose_knowledge.py --project parkers --topic auth --title "Auth" --body "..."
+propose_knowledge.py: error: argument --project: Unknown project slug(s): ['parkers'].
+Known slugs in this install: ['accounting', 'api', 'frontend', 'general', 'mobile', 'parker'].
+To add a new slug: append it to CANONICAL_PROJECT_SLUGS in lib/_project_slugs.py.
+```
+
+Typos like `parkers` (should be `parker`) are caught and returned with the valid slug list. If you genuinely need a new slug, you append it to the set first — that's a deliberate, traceable change.
+
+### 14.3 Auto-stamped `source_user`
+
+Every write captures `$SUDO_USER` (if elevated) or `$USER` and stamps it on the row:
+
+```bash
+$ python3 lib/propose_knowledge.py --project myapp --topic auth --title "Auth" --body "..."
+KS#142 created (project=myapp, tags=['myapp'], topic=auth, source_user=alice)
+```
+
+You always know who wrote what. In multi-user setups (Section 16), this is the audit trail.
+
+### 14.4 Auto-mining: junk path rejection
+
+If you build an automated mining script that reads files and inserts rows, route every insert through `slug_from_path()`:
+
+```python
+from _project_slugs import slug_from_path
+
+slug = slug_from_path(file_path)
+if slug is None:
+    return False  # junk path — never reaches the DB
+```
+
+`slug_from_path()` returns `None` for paths matching `node_modules`, `vendor/`, `.bak`, `.backup.`, `__pycache__`, `/dist/`, `/build/`, etc. The full list is in `JUNK_PATH_MARKERS` in `lib/_project_slugs.py` — extend as needed.
+
+**Why this matters in practice:** during the v1 → v2 migration on the project I built this for, 226 KS rows came from a backup directory (`POD.backup.2026-04-22/CLAUDE.md`) that had been accidentally scanned. Without `slug_from_path()`, every miner-driven scan was a vector for that kind of pollution. With it, those paths can't insert rows at all.
+
+---
+
+## 15. Drift Detection (v2)
+
+The Tier 3 line cap is enforced by the regenerator — but the regenerator only runs when called. Between calls, someone could hand-edit a project brief and bloat it. The drift detector is the safety net.
+
+**Two mechanisms** depending on which AI tool you use:
+
+### 15.1 Stop hook (Claude Code CLI, anything that fires Stop hooks)
+
+Add to your tool's settings. For Claude Code (`~/.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/path/to/RunawayContext/bin/check_md_drift.sh"
+      }]
+    }]
+  }
+}
+```
+
+Fires at session end. The script walks every `project_context_card` row that has an `md_path`, reads the actual file's line count, and compares to `md_line_cap`. If any file is over, it warns to stderr:
+
+```
+⚠ CLAUDE.md drift: /path/to/myapp/CLAUDE.md is 287 lines (cap 150, project=myapp)
+  → regen: python3 lib/ll_brief.py --rebuild-md myapp
+
+1 project CLAUDE.md file(s) over their cap.
+Hand-edits OUTSIDE the PRESERVE_START / PRESERVE_END markers will be wiped on next regen.
+```
+
+Non-blocking — the script always exits 0. The point is visibility, not failure.
+
+### 15.2 Cron / launchd watcher (VS Code Claude extension, anything Stop-hook-less)
+
+For AI tools that don't fire Stop hooks (the VS Code Claude extension is the common case), a scheduled watcher is the alternative.
+
+Linux:
+```bash
+crontab -e
+*/10 * * * * /path/to/RunawayContext/bin/md_drift_watcher.sh
+```
+
+macOS launchd: see `bin/md_drift_watcher.sh` for the plist template. `StartInterval` of 600 seconds.
+
+The watcher writes:
+- **Log file** at `~/_knowledge/logs/md_drift_watcher.log` — append-only event log with timestamps. Hourly heartbeat when clean.
+- **Snapshot file** at `~/_knowledge/logs/md_drift_snapshot.psv` — pipe-separated current-state for any dashboard you want to surface drift in.
+
+### 15.3 Why both?
+
+- **Stop hook** is real-time. The instant a session ends with a bloated file, you know.
+- **Cron watcher** catches drift between sessions, including drift caused by external editors, git pulls, or anyone working without the Stop hook installed.
+
+Run both if you can. The Stop hook fires fast; the watcher is the safety net that catches anything the Stop hook misses.
+
+---
+
+## 16. Multi-User Setup (v2)
+
+If you're running RunawayContext on a shared host (team server, family computer, multi-Linux-user box), every Claude Code / AI-tool user needs the same setup: Stop hook in their settings, seeded MEMORY.md pointing at the new system.
+
+`bin/setup_user_protections.sh` does this in one shot:
+
+```bash
+# Dry run first — see what it would do
+sudo bash bin/setup_user_protections.sh --all
+
+# Apply
+sudo bash bin/setup_user_protections.sh --all --apply
+```
+
+**What it does** (idempotent — safe to re-run):
+1. Discovers every user with a `~/.claude/` dir under `/home/` (Linux) or `/Users/` (macOS).
+2. **Backs up existing files in place** before any modification: `settings.json.pre-rc-v2.YYYYMMDD.bak` and `MEMORY.md.pre-rc-v2.YYYYMMDD.bak` written next to each file.
+3. Merges the Stop hook into each user's `settings.json` (preserves their existing keys — model, permissions, etc.).
+4. If MEMORY.md exists, **prepends** the new-system pointer block; existing notes are preserved underneath. If MEMORY.md doesn't exist, creates it with just the pointer.
+
+**Reversion** is a single `mv` per file:
+
+```bash
+mv ~/.claude/settings.json.pre-rc-v2.20260504.bak ~/.claude/settings.json
+mv ~/.claude/MEMORY.md.pre-rc-v2.20260504.bak     ~/.claude/MEMORY.md
+```
+
+**Cross-platform:** the script detects `Darwin` → `/Users` vs `Linux` → `/home`. Works on either.
+
+**What it does NOT do:**
+- Install RunawayContext itself (clone the repo first).
+- Fork the KS — every user shares one `knowledge.db` / `sessions.db` at `$RC_KS_DIR`. That's the design: one institutional brain, many readers + writers, attribution via `source_user`.
+- Run the v1 → v2 migration. That's a separate concern.
+
+**Per-user CLI access:** in a shared install, you can either let users invoke the full path (`python3 /opt/RunawayContext/lib/ll_brief.py --brief myapp`) or symlink the most-used commands into `/usr/local/bin/`:
+
+```bash
+sudo ln -s /opt/RunawayContext/lib/ll_brief.py /usr/local/bin/rc-brief
+sudo chmod +x /usr/local/bin/rc-brief
+# Now: rc-brief --brief myapp
+```
+
+---
+
 ## Summary
 
 RunawayContext is not a product — it's a **pattern**. The specific tools don't matter. What matters is:
@@ -1648,12 +1954,15 @@ RunawayContext is not a product — it's a **pattern**. The specific tools don't
 1. **Tier your knowledge** — small always-loaded, big on-demand
 2. **Route correctly** — every fact has one home
 3. **Focus on what the AI gets wrong** — don't store common knowledge
-4. **Keep it alive** — update after every significant session
-5. **Start simple** — Constitution + Memory first, add tiers as needed
+4. **Generate, don't curate, the per-project tier** — Tier 3 is built from the DB, not edited by hand
+5. **Guard the write side** — typos and untagged content can't reach the DB
+6. **Detect drift, don't trust discipline** — every file has a cap, and a watcher tells you when the cap is breached
+7. **Start simple** — Constitution + Memory first, add tiers as needed; the executable prompt sets up the rest
 
-The AI doesn't need to be smarter. It needs to **remember**. Give it a brain, and it will surprise you with what it can do.
+The AI doesn't need to be smarter. It needs to **remember** — and the system needs to stay clean without requiring you to be careful. Give it a brain, give the brain a maintenance contract, and it will surprise you with what it can do.
 
 ---
 
-*RunawayContext v1.1 — Developed from real-world use across 1,500+ AI coding sessions.*
+*RunawayContext v2.0 — Developed from real-world use across thousands of AI coding sessions across multiple projects, multiple users, and one painful observation: a memory system that depends on discipline drifts. So we put the discipline into the schema, the CLI write guards, and a drift detector — not into a "be careful" line in the docs.*
+
 *Built on research from: arXiv (Codified Context), Manus (Context Engineering), Mem0, OpenAI Codex, and the Claude Code community.*
