@@ -7,6 +7,26 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) �
 
 ---
 
+## [2.0.1] — 2026-05-06
+
+Documentation tightening. v2.0.0 left a loophole that Tier 2 (Living Memory) could carry "optional detail files for items that need more than a couple lines." Real-world use revealed this loophole is the same drift v2 was meant to prevent — detail files accumulated, all auto-loaded every session, exactly the bloat the system was designed to avoid. v2.0.1 closes it.
+
+### Changed
+
+- **Tier 2 spec is now pointer-only.** MEMORY.md (and equivalents) holds **one line per entry** — a pointer (`LL#N` / `KS#N` / `rule#N`) plus a short hook. Detail content lives **exclusively in `knowledge.db`** (`lessons_learned` / `business_rules` / `data_sources` / `tools`) and is queried on demand. Markdown next to MEMORY.md is no longer a content store.
+- **`BOOTSTRAP.md`, `RUNAWAYCONTEXT.md`, and `run_RunawayContext.md`** updated to reflect the new spec. The "What goes in it" examples now show pointer-only entries. The "Detail files" section in RUNAWAYCONTEXT.md is replaced with a "How to classify each entry (which DB table holds it)" table mapping the four content categories (scar-tissue / behavioral rule / reference / project state) to the right CLI command and resulting `#N` pointer.
+- **Migration guidance for v2.0.0 users.** If your install accumulated detail markdown files in `~/.claude/projects/<encoded-path>/memory/` (or equivalent), they should be migrated: each file's content moves into the appropriate DB table via `--log-lesson` or `propose_knowledge.py`, then the file is deleted and replaced with a one-line pointer in MEMORY.md.
+
+### Why
+
+The 4-tier architecture's core promise is **load-on-demand**: small always-loaded tiers, deep DB queried only when relevant. Allowing detail markdown files in Tier 2 silently expanded the always-loaded surface every time a feedback file was written, eroding the token budget. Closing this loophole brings the docs in line with what v2 was already trying to enforce in code.
+
+### No code changes
+
+This is a documentation-only release. The schema, CLI write guards, drift detector, and v1→v2 migrator are unchanged from 2.0.0.
+
+---
+
 ## [2.0.0] — 2026-05-04
 
 Major architectural upgrade. v1's policy-only constraints quietly drifted over six months of real-world use; v2 moves the discipline into the schema, the CLI write guards, a regenerator with a hard line cap, and a drift detector. The conceptual 4-tier model is unchanged. What changed is **how the discipline is enforced**.

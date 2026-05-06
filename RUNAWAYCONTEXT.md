@@ -70,8 +70,8 @@ Every AI conversation starts with a **context window** — a limited amount of t
 │  Tier 1: CONSTITUTION (always loaded)       │  ~200 lines
 │  Rules, preferences, routing instructions   │  Loaded: EVERY session
 ├─────────────────────────────────────────────┤
-│  Tier 2: LIVING MEMORY (always loaded)      │  ~50 lines + detail files
-│  Behavioral gotchas, corrections, lessons   │  Loaded: EVERY session
+│  Tier 2: LIVING MEMORY (always loaded)      │  ~50 lines, pointers only
+│  LL#N / KS#N / rule#N pointers + hooks      │  Loaded: EVERY session
 ├─────────────────────────────────────────────┤
 │  Tier 3: PROJECT BRAINS (loaded per-task)   │  No limit per file
 │  Business rules, schemas, changelogs        │  Loaded: When working in that project
@@ -92,7 +92,7 @@ Every AI conversation starts with a **context window** — a limited amount of t
 | Tier | What | Size Limit | When Loaded | Contains |
 |------|------|-----------|-------------|----------|
 | **1. Constitution** | Global instruction file | ~200 lines | Every session | Your preferences, routing rules, tool configs, behavioral mandates |
-| **2. Living Memory** | Auto-memory index + detail files | ~50 line index | Every session | Corrections, gotchas, patterns the AI keeps getting wrong |
+| **2. Living Memory** | Pointer-only index (`LL#N` / `KS#N` / `rule#N`) | ~50 line index | Every session | Corrections, gotchas, patterns the AI keeps getting wrong — content lives in the DB, queried on demand |
 | **3. Project Brains** | Per-project instruction files | No hard limit | When you work in that directory | Business rules, schemas, API docs, changelogs, decision logs |
 | **4. Knowledge Store** | Searchable database or file collection | Unlimited | On-demand via search/query | Full schemas, reference tables, terminology, metrics |
 
@@ -243,44 +243,48 @@ Think of it as the AI's "mistakes I must not repeat" list.
 
 ### Structure: Index + Detail Files
 
-The key insight is the **index + companion file** pattern:
+The key insight is the **pointer index + DB silo** pattern:
 
-**MEMORY.md** (the index — always loaded, kept small):
+**MEMORY.md** (the index — always loaded, kept small, **pointers only**):
 ```markdown
 # Living Memory
-<!-- Max ~50 lines. Each entry: 1-3 lines. Link to detail files for depth. -->
+<!-- Max ~50 lines. One line per entry: a pointer (LL#N / KS#N / rule#N) + short hook.
+     Detail content lives in the DB — never in markdown. Drill in via:
+       knowledge.py --ll-get N    (lessons)
+       knowledge.py --rule N      (business rules)
+       knowledge.py --source N    (data sources / tools) -->
 
 ## Database Gotchas
-- **Field X is NOT aggregatable** — has dual semantics. Use table Y instead.
-- **Always TRIM(field)** when querying table Z — inconsistent trailing spaces.
+- LL#88 — Field X is NOT aggregatable; has dual semantics
+- rule#1338 — TRIM(field) when querying table Z
 
 ## API Gotchas
-- **Base URL** — docs site is NOT the API. Actual: `api.example.com/v1`
-- [Auth token refresh race condition](memory/feedback_auth_race.md)
+- LL#92 — Base URL: docs site is NOT the API; actual is api.example.com/v1
+- LL#103 — OAuth refresh race condition under concurrent requests
 
 ## User Preferences
-- Be concise with code edits — describe changes briefly, don't show full diffs.
-- Prefers dynamic calculations over hardcoded values.
+- rule#2410 — Be concise on code edits; no full diffs unless asked
+- rule#2411 — Prefer dynamic calculations over hardcoded values
 ```
 
-**Detail files** (loaded only when the topic comes up):
-```markdown
----
-name: Auth Token Race Condition
-description: OAuth refresh can race with concurrent requests causing 401 cascades
-type: feedback
----
+**No companion files.** Anything longer than one line — the *what happened*, *why*, *fix*, *how to apply* — goes directly into the DB at write time:
+```bash
+# Scar-tissue incident (the long-form story) → lessons_learned
+python3 lib/ll_brief.py --log-lesson \
+    --ll-projects api,auth \
+    --ll-title "OAuth refresh race condition" \
+    --ll-what-happened "Two API calls fired simultaneously..." \
+    --ll-why "..." --ll-fix "..." --ll-prevent "..."
+# Returns LL#103 — add the one-line pointer to MEMORY.md.
 
-## What Happened
-Two API calls fired simultaneously. Both detected an expired token. Both tried to refresh.
-The second refresh invalidated the first's new token.
-
-## The Fix
-Use a mutex/lock around token refresh. Only one request refreshes; others wait for it.
-
-## How to Apply
-When touching auth middleware, ensure token refresh is serialized. Never fire concurrent refreshes.
+# Active discipline / rule → business_rules
+python3 lib/propose_knowledge.py --type rule --project api \
+    --name "TRIM contract field" \
+    --rule "Always TRIM(field) when querying the contracts table — trailing spaces are inconsistent."
+# Returns rule#1338 (after approval) — add the pointer.
 ```
+
+The DB row carries unlimited detail; the index stays under 50 lines because it only carries the pointer + hook. The AI loads the pointer every session, drills into the DB row only when the topic actually comes up.
 
 ### What Goes In Living Memory
 
@@ -294,26 +298,28 @@ When touching auth middleware, ensure token refresh is serialized. Never fire co
 
 ### What Does NOT Go In Living Memory
 
-- Project-specific data (→ Tier 3: Project Brain)
-- Reference data like schemas (→ Tier 4: Knowledge Store)
-- Anything longer than 3 lines (→ detail file, linked from index)
+- Project-specific data (→ Tier 3: Project Brief, generated from `project_context_card`)
+- Reference data like schemas (→ Tier 4: Knowledge Store, `data_sources`)
+- **Anything longer than one line** (→ DB row: `lessons_learned` / `business_rules` / `data_sources` / `tools`, queried on demand)
 - Things derivable from the code
 - Ephemeral task details
 
-### Memory Types (for detail files)
+### How to Classify Each Entry (which DB table holds it)
 
-Use YAML frontmatter to classify each detail file:
+When you have something to capture, classify it before writing — that decides which DB table holds the detail and which `#N` pointer goes in MEMORY.md:
 
-| Type | Description | Decay |
-|------|-------------|-------|
-| `feedback` | Correction from the user | Permanent (until explicitly removed) |
-| `user` | Information about the user | Permanent |
-| `project` | Ongoing work/initiative status | Review monthly |
-| `reference` | Pointer to external information | Permanent |
+| Category | Goes in DB table | CLI |
+|------|----------|------|
+| **Scar-tissue incident** (what happened, why, the fix, prevention rule) | `lessons_learned` | `knowledge.py --log-lesson ...` → returns `LL#N` |
+| **Active behavioral rule / discipline** (correction, validated pattern, user preference) | `business_rules` | `propose_knowledge.py --type rule ...` → returns `rule#N` after approval |
+| **Reference / system / endpoint** (Slack channel, dashboard URL, board id, table location) | `data_sources` or `tools` | `propose_knowledge.py --type gotcha` / `--type tool` |
+| **Project state / initiative** (ongoing work, deadlines, owners) | `project_context_card.overview` (the PRESERVE block of that project's brief) | Edit the PRESERVE block; auto-loads when entering the project |
+
+In every case, only the resulting `LL#N` / `rule#N` / `src#N` pointer is added to MEMORY.md — the detail stays in the DB.
 
 ### Size Budget
 
-**Index: ~50 lines maximum.** Detail files: no limit, but keep each one focused on a single topic (typically under 30 lines).
+**Index: ~50 lines maximum, pointers only.** DB rows have no length cap — that's where unlimited detail belongs. Query them on demand.
 
 ### Maintenance
 
@@ -766,9 +772,8 @@ Claude Code has the best native support for this system because CLAUDE.md and au
 **Tier 2 — Living Memory:**
 - Built-in: `~/.claude/projects/<encoded-path>/memory/MEMORY.md`
 - Auto-loaded every session
-- Claude creates memory files here when you correct it
-- You can also manually create/edit files here
-- Detail files go in the same directory, linked from MEMORY.md
+- Pointer-only index — when Claude has something worth remembering, it writes the detail to the DB (`lessons_learned` / `business_rules` / `data_sources`) and adds a one-line `LL#N` / `rule#N` / `src#N` pointer to MEMORY.md
+- No companion / detail markdown files. Markdown next to MEMORY.md is not a content store; the DB is.
 
 **Tier 3 — Project Brains:**
 - File: `CLAUDE.md` in each project subdirectory
@@ -1120,7 +1125,8 @@ Create your memory index file. Start it empty — it will fill naturally as you 
 ```markdown
 # Living Memory
 <!-- Behavioral gotchas and corrections. Keep under 50 lines. -->
-<!-- Link to detail files for anything longer than 3 lines. -->
+<!-- ONE LINE per entry — pointer (LL#N / rule#N / KS#N) + short hook. -->
+<!-- Detail content lives in knowledge.db, never in markdown. -->
 ```
 
 ### Step 3: Work Normally (ongoing)
@@ -1206,11 +1212,12 @@ When you find yourself repeatedly explaining the same reference data (database s
 ```markdown
 # Living Memory
 <!-- Cross-session behavioral gotchas. Keep under 50 lines total.
-     2-3 lines per entry. Link to detail files for depth.
+     ONE LINE per entry: pointer (LL#N / rule#N / KS#N) + short hook.
+     Detail content lives in knowledge.db — never in markdown.
      Project data → project CLAUDE.md | Reference data → Knowledge Store -->
 
 ## Patterns
-- [Pattern entries will accumulate here as you work]
+- [Pointer entries (`rule#N — short hook`) will accumulate here as you work]
 
 ## Gotchas
 - [Gotcha entries will accumulate here]

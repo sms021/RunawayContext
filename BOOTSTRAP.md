@@ -50,9 +50,9 @@ The trick is **not dumping everything into one file.** AI accuracy drops when co
 
 ## Tier 2: Living Memory
 
-**What**: A short index of behavioral corrections and patterns — things the AI keeps getting wrong that you've had to fix. Plus optional detail files for items that need more than a couple lines.
+**What**: A short pointer-only index of behavioral corrections and patterns — things the AI keeps getting wrong that you've had to fix. Each entry is a one-line `LL#N` / `KS#N` / `rule#N` reference into the DB plus a short hook. **Detail content lives in the database, never in markdown.**
 
-**Why**: AI assistants make the same mistakes across conversations. You correct them once, they learn for that session, then forget. Living Memory makes corrections permanent. It's the fastest tier to show value because every entry directly prevents a repeated mistake.
+**Why**: AI assistants make the same mistakes across conversations. You correct them once, they learn for that session, then forget. Living Memory makes corrections permanent. It's the fastest tier to show value because every entry directly prevents a repeated mistake. Keeping the always-loaded tier as pointers (and content in the queryable silo) keeps token overhead minimal — the AI loads the pointer, then drills into the DB only when the topic actually comes up in conversation.
 
 **How**: Create a memory index file:
 
@@ -63,14 +63,21 @@ The trick is **not dumping everything into one file.** AI accuracy drops when co
 | GitHub Copilot | `.github/memory.md` |
 | Others | `MEMORY.md` in project root |
 
-**What goes in it**:
-- Corrections: "JCCP stores deltas, not cumulative values — always SUM across months"
-- Gotchas: "The VS Code extension doesn't fire CLI hooks — use a cron watcher instead"
-- Patterns: "Always use TRIM(field) when querying this table — trailing spaces are inconsistent"
+**What goes in it** (each line is a pointer + short hook — content is in the DB):
+- `LL#42 — JCCP stores deltas, always SUM across months` *(content in `lessons_learned`)*
+- `LL#47 — VS Code extension doesn't fire CLI hooks; use cron watcher` *(content in `lessons_learned`)*
+- `rule#1338 — TRIM(field) when querying contracts table` *(content in `business_rules`)*
+- `t#2091 — Master Projects Board ID 10075481523` *(content in `terminology` or `data_sources`)*
 
-**Format**: 2-3 lines per entry, max. If something needs more depth, create a separate detail file and link to it from the index. The index itself should stay under 50 lines.
+**Format**: **One line per entry** — a pointer plus a short hook so a future session knows whether to drill in. The index stays under 50 lines. Anything longer than one line goes into the DB:
+- Behavioral correction / discipline → `business_rules` (via `propose_knowledge.py --type rule`)
+- Scar-tissue incident (what happened → why → fix → prevent) → `lessons_learned` (via `knowledge.py --log-lesson`)
+- Reference (a system, board, channel, dashboard) → `data_sources` or `tools` (via `propose_knowledge.py`)
+- Project state / ongoing initiative → the project's `project_context_card` overview field
 
-**When to add entries**: Whenever you correct the AI and the correction isn't obvious from the code itself. Both failures (things it got wrong) and validated approaches (things it got right that were non-obvious) are worth capturing.
+**No detail files.** Markdown next to MEMORY.md is not a place to store content; the DB is. If you find yourself wanting a long-form note, that's a signal it belongs in `lessons_learned` or `business_rules` — write it there, then add a one-line pointer to MEMORY.md.
+
+**When to add entries**: Whenever you correct the AI and the correction isn't obvious from the code itself. Both failures (things it got wrong) and validated approaches (things it got right that were non-obvious) are worth capturing — but always as a DB row first, with the MEMORY.md pointer added afterward.
 
 ---
 

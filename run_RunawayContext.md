@@ -255,32 +255,38 @@ Create the memory index file (correct location for my tool) with:
 ```markdown
 # Living Memory
 <!-- Cross-session behavioral gotchas. Keep under 50 lines total.
-     2-3 lines per entry max. Link to detail files for depth.
+     ONE LINE per entry: pointer (LL#N / rule#N / KS#N) + short hook.
+     Detail content lives in knowledge.db, never in markdown.
      Project data → project brain | Reference data → Knowledge Store -->
 
 ## Preferences
-- [Seed from my answer to question 0.2.4, if I gave preferences]
+- [Seed pointers from my answer to question 0.2.4, if I gave preferences]
+  (Each preference becomes a `business_rules` row → `rule#N` pointer here.)
 
 ## Gotchas
-<!-- Will fill naturally as we work together -->
+<!-- Will fill naturally — each entry is a `LL#N — short hook` line, content in lessons_learned -->
 
 ## Patterns
-<!-- Will fill naturally as we work together -->
+<!-- Will fill naturally — each entry is a `rule#N — short hook` line, content in business_rules -->
 ```
 
 ### 4.2 — Seed from Existing Content
-If existing instruction files contained corrections, gotchas, or "never do X" items (classified in Phase 2.4):
-- Items under 3 lines → add directly to the memory index
-- Items over 3 lines → create a detail file and link to it from the index
+If existing instruction files contained corrections, gotchas, or "never do X" items (classified in Phase 2.4), every item — regardless of length — goes into the DB at write time, with only its `LL#N` / `rule#N` / `src#N` pointer added to the memory index:
+- Scar-tissue incident (something burned us) → `lessons_learned` via `--log-lesson` → returns `LL#N`
+- Active rule / discipline / preference → `business_rules` via `propose_knowledge.py --type rule` → returns `rule#N`
+- Reference (system, dashboard, channel, board id) → `data_sources` or `tools` → returns `src#N` / `t#N`
 
-### 4.3 — Create the Memory Directory
-If my tool supports detail files (Claude Code does natively, others need a `_memory/` directory), create the directory structure:
+**Detail content never goes in markdown.** Markdown next to MEMORY.md is not a store.
+
+### 4.3 — Memory Directory Layout
+The memory directory holds a single index file. No companion / detail files.
 
 ```
 [memory location]/
-├── MEMORY.md (or equivalent index file)
-└── [detail files will go here as we work]
+└── MEMORY.md (or equivalent index file)
 ```
+
+If older versions of this system left detail files in this directory, migrate them: each one's content moves into the appropriate DB table (lessons_learned / business_rules / data_sources / tools), and the file is deleted. The pointer takes its place in MEMORY.md.
 
 ---
 
