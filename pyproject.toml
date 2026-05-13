@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "runaway-context"
+version = "3.0.0"
+description = "A contract-enforced living context platform for AI coding assistants."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Runaway Ideas" }]
+keywords = ["ai", "memory", "context", "rag", "llm", "claude", "cursor", "mcp"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = []
+semantic = []
+dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.1.0"]
+
+[project.scripts]
+runaway = "runaway_context.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sms021/RunawayContext"
+Documentation = "https://github.com/sms021/RunawayContext"
+Repository = "https://github.com/sms021/RunawayContext"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+runaway_context = ["templates/**/*", "schema/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "contract: HR-* contract tests (Part 0 of the plan)",
+    "feature: per-feature tests for E1-E24",
+    "slow: slow tests, skip with -m 'not slow'",
+]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["src/runaway_context"]
+omit = ["src/runaway_context/_*.py", "src/runaway_context/*/_*.py"]
+
+[tool.coverage.report]
+fail_under = 85
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

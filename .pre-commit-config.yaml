@@ -1,0 +1,42 @@
+# RunawayContext v3 — pre-commit hooks
+#
+# Part VI.1 of the plan. Hooks block before commit. Not optional (Hooks
+# are not optional. Adopters' AIs that disable them have left the contract).
+
+repos:
+  - repo: local
+    hooks:
+      - id: no-todo
+        name: HR-13 — no TODO/FIXME/HACK/XXX in shipping code
+        entry: bash bin/check_no_todo.sh
+        language: system
+        pass_filenames: false
+        types: [python, markdown]
+
+      - id: no-skip-in-contract
+        name: L10 — no @pytest.mark.skip in tests/contract/
+        entry: bash bin/check_no_skip_in_contract.sh
+        language: system
+        pass_filenames: false
+        files: ^tests/contract/
+
+      - id: no-silent-except
+        name: HR-10 — no silent except (lint)
+        entry: bash bin/check_no_silent_except.sh
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: docstring-present
+        name: HR-14 — every public symbol has a docstring
+        entry: python3 bin/check_docstrings.py
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: no-print
+        name: Discipline — no print() in src/ (use logging)
+        entry: bash bin/check_no_print.sh
+        language: system
+        pass_filenames: false
+        types: [python]
