@@ -36,15 +36,43 @@ SESSIONS_SCHEMA_FILES = ["002_sessions_db.sql"]
 METRICS_SCHEMA_FILES = ["004_metrics_db.sql"]
 
 
+# Canonical v1 column fingerprints. A file that has the v1 *table names* but
+# lacks any of these required columns is NOT a v1 RunawayContext install — it
+# is a third-party DB that happens to share names (e.g. a homemade sessions.py
+# system). The migrator refuses to touch such files because applying v3
+# additions to the wrong schema corrupts the file in subtle ways and forces a
+# restore-from-backup that the user may not notice in time. See LL: 2026-05-13.
+V1_REQUIRED_COLUMNS: Dict[str, frozenset] = {
+    "knowledge_chunks": frozenset({"topic", "title", "body"}),
+    "lessons_learned": frozenset({"prevention_rule"}),
+    "sessions": frozenset({"conversation_id", "full_transcript"}),
+}
+
+
+def _columns_of(conn: sqlite3.Connection, table: str) -> frozenset:
+    try:
+        return frozenset(r[1] for r in conn.execute(f"PRAGMA table_info({table})"))
+    except sqlite3.OperationalError:
+        return frozenset()
+
+
 def detect_v1_layout(knowledge_db: Path) -> bool:
     """Return True iff *knowledge_db* is a v1 single-file install.
 
     v1 fingerprint: ``knowledge_chunks`` + ``lessons_learned`` + ``sessions``
-    (transcripts) all co-located in one DB file. v2 split this into two files;
-    a file matching the v1 fingerprint pre-dates the split.
+    (transcripts) all co-located in one DB file, *and* the canonical v1 column
+    set is present in each (see :data:`V1_REQUIRED_COLUMNS`). v2 split this
+    into two files; a file matching the v1 fingerprint pre-dates the split.
+
+    The column check is what distinguishes a real v1 install from a homemade
+    DB that happens to share table names. Without it the migrator would
+    partially apply v3 additions to a foreign schema (writing
+    ``schema_version`` and ``session_logs``) before failing on a missing column
+    — corrupting the user's file. See HR-4.
 
     Returns:
-        True only when all three v1 tables exist in the file.
+        True only when all three v1 tables exist AND each carries its required
+        canonical column set.
 
     Refuses:
         Nothing — read-only probe.
@@ -60,9 +88,57 @@ def detect_v1_layout(knowledge_db: Path) -> bool:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
+        if not {"knowledge_chunks", "lessons_learned", "sessions"}.issubset(tables):
+            return False
+        for tbl, required in V1_REQUIRED_COLUMNS.items():
+            if not required.issubset(_columns_of(conn, tbl)):
+                return False
+        return True
     finally:
         conn.close()
-    return {"knowledge_chunks", "lessons_learned", "sessions"}.issubset(tables)
+
+
+def detect_foreign_v1_shape(knowledge_db: Path) -> Optional[Dict[str, List[str]]]:
+    """Return a mapping of v1-named tables that are missing canonical columns.
+
+    A return value indicates the file has v1 table NAMES but does NOT match the
+    canonical v1 RunawayContext schema. The migrator uses this to emit a clear
+    refusal pointing the user at ``runaway import-legacy`` instead of partially
+    upgrading a foreign DB.
+
+    Returns:
+        ``None`` when the file is either a real v1 install or completely
+        unrelated. A dict ``{table: [missing_columns]}`` when the file shares
+        table names but is missing canonical columns.
+
+    Refuses:
+        Nothing — read-only probe.
+    """
+    p = Path(knowledge_db)
+    if not p.exists():
+        return None
+    conn = sqlite3.connect(str(p))
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        v1_table_overlap = {"knowledge_chunks", "lessons_learned", "sessions"} & tables
+        if not v1_table_overlap:
+            return None
+        missing: Dict[str, List[str]] = {}
+        for tbl, required in V1_REQUIRED_COLUMNS.items():
+            if tbl not in tables:
+                continue
+            have = _columns_of(conn, tbl)
+            gap = sorted(required - have)
+            if gap:
+                missing[tbl] = gap
+        return missing or None
+    finally:
+        conn.close()
 
 
 def _split_v1_sessions(v1_path: Path, sessions_db: Path) -> int:
@@ -260,6 +336,27 @@ def migrate(
                              metrics_db=metrics_db)
 
     knowledge_db.parent.mkdir(parents=True, exist_ok=True)
+
+    # Pre-flight: refuse to touch a DB that has v1-shaped table names but is
+    # NOT a canonical v1 install. Without this, we'd partially apply v3
+    # additions to a foreign schema, then abort mid-migration leaving
+    # schema_version / session_logs tables behind (HR-4 violation).
+    if knowledge_db.exists():
+        foreign = detect_foreign_v1_shape(knowledge_db)
+        if foreign and not detect_v1_layout(knowledge_db):
+            details = "; ".join(
+                f"{t} is missing canonical columns: {', '.join(cols)}"
+                for t, cols in foreign.items()
+            )
+            raise MigrationAborted(
+                f"{knowledge_db} has v1 table NAMES but is not a canonical v1 "
+                f"RunawayContext install ({details}). The migrator refuses to "
+                f"touch it to avoid corrupting a foreign schema. If this is your "
+                f"data and you want to bring it into v3, use:\n"
+                f"  runaway import-legacy --from {knowledge_db.parent}\n"
+                f"which preserves your file and copies rows into a fresh v3 install."
+            )
+
     if backup and knowledge_db.exists():
         backup_path = knowledge_db.with_suffix(knowledge_db.suffix + ".pre-v3.bak")
         shutil.copy2(knowledge_db, backup_path)
@@ -275,6 +372,27 @@ def migrate(
             sessions_db = target_sessions
             report.sessions_db = target_sessions
 
+    def _restore_and_raise(reason: str, original_exc: Optional[BaseException] = None) -> None:
+        """Restore the knowledge.db from backup (if present) and raise.
+
+        Called on any unexpected error during schema application so a partial
+        migration never lingers on disk. HR-4: a failed migration leaves the
+        DB exactly as it was before the migrator ran.
+        """
+        report.aborted_reason = reason
+        if report.backup_path and report.backup_path.exists():
+            try:
+                shutil.copy2(report.backup_path, knowledge_db)
+            except OSError:
+                # HR-8: best-effort restore. If the backup copy itself fails
+                # (full disk, permissions, race) we'd rather surface the
+                # original migration exception than mask it with the copy
+                # error — the original cause is more actionable for the user.
+                pass  # HR-8: surface original migration failure
+        if original_exc is not None:
+            raise MigrationAborted(reason) from original_exc
+        raise MigrationAborted(reason)
+
     conn = sqlite3.connect(knowledge_db)
     try:
         # capture row counts before
@@ -284,14 +402,28 @@ def migrate(
             t: _table_info(conn, t) for t in ("knowledge_chunks", "lessons_learned")
         }
 
-        # apply each schema file
+        # apply each schema file under a try/except so any unexpected SQL
+        # failure restores from backup instead of leaving a half-migrated file.
         for fname in SCHEMA_FILES:
             sql_path = _schema_dir() / fname
             if not sql_path.exists():
                 continue
-            _apply_sql_file(conn, sql_path)
+            try:
+                _apply_sql_file(conn, sql_path)
+                conn.commit()
+            except Exception as exc:
+                # Close before restore so the file is unlocked. A close failure
+                # here is itself non-recoverable and would only obscure the
+                # underlying SQL error we're already about to raise — so we
+                # swallow it deliberately (HR-8 best-effort cleanup).
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass  # HR-8: best-effort cleanup before restore
+                _restore_and_raise(
+                    f"schema apply failed for {fname}: {exc}", original_exc=exc,
+                )
             report.steps_applied.append(fname)
-            conn.commit()
 
         # post-step verification: no column lost (HR-4)
         for t, before in cols_before.items():

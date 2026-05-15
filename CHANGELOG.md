@@ -7,6 +7,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) �
 
 ---
 
+## [3.0.1] — 2026-05-15
+
+Data-safety patch. Two distinct paths in v3.0.0 could destroy user content; both are now closed at the code level with contract tests. **Recommended upgrade for every v3.0.0 install** — even one accidental `regen_brief` against a hand-edited project CLAUDE.md can wipe weeks of notes.
+
+### Fixed
+
+- **Brief writer no longer clobbers user-authored files (HR-5 no-clobber).** `brief.regenerate()` now refuses to overwrite any target whose first 256 bytes do not contain the `AUTO-GENERATED` banner head. Hand-edited project CLAUDE.md / README / Constitution files at `project_context_card.md_path` raise `BriefClobberRefused` instead of being silently destroyed. The recommended fix when a project's `md_path` points at user content is to retarget at a sibling `CLAUDE_BRIEF.md`. (Discovered 2026-05-13 during a real install: a user lost 12 days of edits to a project CLAUDE.md before the writer was guarded.)
+- **Migrator refuses foreign v1-shaped DBs (HR-4 atomicity).** A DB that shares v1 table names (`knowledge_chunks`, `lessons_learned`, `sessions`) but lacks canonical v1 columns (e.g. `lessons_learned.prevention_rule`) is now detected by `detect_foreign_v1_shape()` *before* any write. The migrator raises `MigrationAborted` with a `runaway import-legacy` hint and leaves the foreign file byte-identical. Previously the migrator would partially apply v3 additions (writing `schema_version` and `session_logs` tables into the foreign file) before failing on a missing column, forcing manual restore. (Discovered 2026-05-13 against a homemade `sessions.py` system that happened to share table names.)
+- **Migrator restores from backup on any mid-flight SQL error (HR-4 atomicity).** `_apply_sql_file` is now wrapped in a try/except inside `migrate()`. Any unexpected `sqlite3.OperationalError` triggers `_restore_and_raise`, which copies the `.pre-v3.bak` snapshot back over the in-progress file before raising. The DB is left exactly as it was before the migrator started.
+
+### Added
+
+- `runaway_context.errors.BriefClobberRefused` — new typed exception, documented refusal path on `brief.regenerate()` (HR-14).
+- `runaway_context.migrate.detect_foreign_v1_shape()` — read-only probe returning `{table: [missing_columns]}` for diagnostic surfaces.
+- `runaway_context.migrate.V1_REQUIRED_COLUMNS` — public-export constant of the canonical v1 column fingerprint, callable from doctor / import-legacy.
+- `tests/contract/test_hr_05_no_clobber.py` — 5 tests covering refuse-on-user-content, allow-on-prior-brief, fresh-target, dry-run, README target (HR-12).
+- `tests/contract/test_hr_04_migration_atomic.py` — 5 tests covering foreign-shape detection, refusal, byte-identical preservation, fresh-DB migration, and forced mid-migration rollback (HR-12).
+
+### Changed
+
+- **`detect_v1_layout()` is now column-fingerprint aware.** Returns True only when v1 table names AND `V1_REQUIRED_COLUMNS` are both present. Previously, table-name match alone returned True, which caused the foreign-DB incident.
+- **`HARD_RULES.md`:** HR-4 now explicitly requires foreign-shape refusal and atomic rollback. HR-5 now explicitly requires no-clobber on non-banner targets.
+- **`tests/unit/test_e20_brief_more.py::test_regenerate_preserves_block`:** the seed file now starts with the AUTO-GENERATED banner so the test exercises the intended PRESERVE-block-survives-regen path rather than tripping the new no-clobber guard.
+
+### Notes for v3.0.0 users
+
+If you already have an install where `project_context_card.md_path` points at a hand-edited CLAUDE.md (the v3.0.0 install spec did not warn against this), v3.0.1 will not migrate the path for you in this patch — it will only stop the writer from destroying the file. The unified `runaway doctor` flow in v3.1.0 will offer to retarget those rows at `CLAUDE_BRIEF.md` with a backup + prompt. Until then, you can repoint manually:
+
+```sql
+UPDATE project_context_card
+SET md_path = REPLACE(md_path, '/CLAUDE.md', '/CLAUDE_BRIEF.md')
+WHERE md_path LIKE '%/CLAUDE.md';
+```
+
+---
+
 ## [3.0.0] — 2026-05-13
 
 The contract-enforced rewrite. v3 is **non-destructive** vs. v2 (HR-4): every v2 column, table, and row is preserved. What changes is the *contract surface* — fifteen named hard rules with machine-checkable enforcers, a six-rung tier ladder with promotion gates, an MCP server, a maturation curve, three-axis severity, slug lifecycle, audit log, and ten written specs for the integrations adopters' AIs build themselves.

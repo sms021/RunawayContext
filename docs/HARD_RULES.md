@@ -33,19 +33,19 @@ This document mirrors Part 0 of the implementation plan and links each rule to t
 - **Test file:** `tests/contract/test_hr_3_no_hard_delete_paths.py`. Walks every public method, every CLI subcommand, every MCP tool; confirms none can hard-delete.
 - **Violation handler:** Delete rejected at SQL layer.
 
-## HR-4 — Migration is non-destructive
+## HR-4 — Migration is non-destructive AND atomic
 
-- **Rule:** No v3 schema change drops a column, drops a table, or changes a column's type incompatibly. `ADD COLUMN`, `CREATE TABLE`, `CREATE VIEW`, `CREATE INDEX` only.
-- **Enforcer:** Migrator runs `PRAGMA table_info()` before and after each step. Any column lost = abort + restore from backup.
-- **Test file:** `tests/contract/test_hr_4_migration_preserves_v2_surface.py`. Loads a frozen v2 fixture DB (`tests/fixtures/v2_clean.db` and `tests/fixtures/v2_with_data.db`), runs the migrator, asserts every v2 column and row count is present.
-- **Violation handler:** Migrator aborts; backup restored; exit 2 with diagnostic.
+- **Rule:** No v3 schema change drops a column, drops a table, or changes a column's type incompatibly. `ADD COLUMN`, `CREATE TABLE`, `CREATE VIEW`, `CREATE INDEX` only. **Additionally (3.0.1+):** the migrator must (a) refuse to touch a DB whose tables match v1 names but lack canonical v1 columns — i.e. a homemade or foreign DB that happens to share names — and (b) restore from the pre-migration backup on any unexpected error so a partial migration never lingers on disk.
+- **Enforcer:** Migrator runs `PRAGMA table_info()` before and after each step. Any column lost = abort + restore from backup. `detect_foreign_v1_shape()` returns the missing canonical columns for the foreign-shape refusal. `_restore_and_raise()` wraps schema application in atomic try/except.
+- **Test files:** `tests/contract/test_hr_04_migration_preserves_v2_surface.py` (column preservation) and `tests/contract/test_hr_04_migration_atomic.py` (foreign-shape refusal + atomic rollback). The latter asserts a foreign DB is byte-identical after a refused migration — no `schema_version` / `session_logs` tables left behind.
+- **Violation handler:** Migrator aborts; backup restored; `MigrationAborted` raised with a `runaway import-legacy` hint when the cause is a foreign shape.
 
-## HR-5 — Tier budgets are enforced in code, not policy
+## HR-5 — Tier budgets are enforced in code, not policy AND no-clobber
 
-- **Rule:** T1 ≤200 lines. T2 ≤50 lines (pointer-only). T3 ≤150 lines per project. The brief regenerator refuses to write past cap.
-- **Enforcer:** `md_writer.write_brief()` counts lines pre-write; raises `BriefBudgetExceeded` if over. Drift detector watches always-loaded files; alerts on every overrun.
-- **Test file:** `tests/contract/test_hr_5_regenerator_refuses_overflow.py`. Constructs a corpus that would produce a 200-line brief at the 150 cap, asserts the writer raises and writes nothing.
-- **Violation handler:** Write rejected; user gets clear "this corpus exceeds your tier budget, here is what to prune."
+- **Rule:** T1 ≤200 lines. T2 ≤50 lines (pointer-only). T3 ≤150 lines per project. The brief regenerator refuses to write past cap. **Additionally (3.0.1+):** the regenerator refuses to overwrite any target file that does not start with the v3 `AUTO-GENERATED` banner. User-authored CLAUDE.md / README / Constitution files are never silently clobbered, even when `project_context_card.md_path` points at them.
+- **Enforcer:** `brief.regenerate()` counts lines pre-write and raises `BriefBudgetExceeded` if over cap; checks for the banner head in the target's first 256 bytes and raises `BriefClobberRefused` otherwise. Drift detector watches always-loaded files; alerts on every overrun.
+- **Test files:** `tests/contract/test_hr_05_regenerator_refuses_overflow.py` (cap) and `tests/contract/test_hr_05_no_clobber.py` (no-clobber). The latter pre-seeds a user-authored CLAUDE.md, asserts regen raises `BriefClobberRefused`, and asserts the file is byte-identical afterward.
+- **Violation handler:** Write rejected; user gets clear "this corpus exceeds your tier budget" or "retarget md_path at CLAUDE_BRIEF.md to keep your authored content safe."
 
 ## HR-6 — Author identity is opaque
 

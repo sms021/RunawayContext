@@ -96,9 +96,16 @@ def test_regenerate_writes(seeded_client):
 
 
 def test_regenerate_preserves_block(seeded_client):
+    """A prior v3 brief is overwritten but its PRESERVE block is carried over.
+
+    The seeded file must carry the AUTO-GENERATED banner; otherwise the writer
+    treats it as user-authored content and (correctly) refuses to clobber it
+    (HR-5 no-clobber, added 2026-05-14).
+    """
     md_path = _wire_card(seeded_client)
     md_path.write_text(
-        f"# tooling\n{PRESERVE_START}\nKEEP ME\n{PRESERVE_END}\n"
+        f"{brief_mod.BANNER}\n\n"
+        f"{PRESERVE_START}\nKEEP ME\n{PRESERVE_END}\n"
     )
     out = regenerate(seeded_client.install_dir, "tooling")
     content = md_path.read_text()

@@ -28,20 +28,41 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from runaway_context._db import connect, transaction
 from runaway_context.config import DEFAULT_BRIEF_LINE_CAP
-from runaway_context.errors import BriefBudgetExceeded
+from runaway_context.errors import BriefBudgetExceeded, BriefClobberRefused
 
 
 PRESERVE_START = "<!-- PRESERVE_START -->"
 PRESERVE_END = "<!-- PRESERVE_END -->"
 
+BANNER_HEAD = "<!-- AUTO-GENERATED — DO NOT HAND-EDIT."
 BANNER = (
-    "<!-- AUTO-GENERATED — DO NOT HAND-EDIT.\n"
+    f"{BANNER_HEAD}\n"
     "This file is regenerated from knowledge.db / project_context_card.\n"
     "Edit content via the Client.log_lesson / propose_knowledge methods,\n"
     "then rebuild via Client.regen_brief(<slug>).\n"
     "The only block preserved across rebuilds is between\n"
     "PRESERVE_START / PRESERVE_END below. -->"
 )
+
+
+def _is_v3_brief(path: Path) -> bool:
+    """True iff *path* exists and its first 256 bytes contain the v3 banner head.
+
+    A "v3 brief" is any file the writer previously generated — identified by the
+    AUTO-GENERATED banner at the top. Any other content (a hand-edited CLAUDE.md,
+    a README, a Constitution, an empty file the user created intentionally) is
+    treated as user-authored and the writer refuses to overwrite it.
+
+    Refuses:
+        Nothing — pure inspection.
+    """
+    if not path.exists():
+        return False
+    try:
+        head = path.read_bytes()[:256].decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    return BANNER_HEAD in head
 
 
 def _json_load(value: Optional[str], default: Any) -> Any:
@@ -261,11 +282,17 @@ def regenerate(
 
     Raises:
         BriefBudgetExceeded: when the brief would exceed *cap* lines (HR-5).
+        BriefClobberRefused: when ``md_path`` exists and is not a v3-generated
+            brief (HR-5 no-clobber).
         ValueError: when no ``project_context_card`` exists for *project*.
 
     Refuses:
         Writing past the configured cap. The cap defaults to
         :data:`DEFAULT_BRIEF_LINE_CAP` (150). Pass ``cap=N`` to override.
+
+        Overwriting a target that lacks the v3 AUTO-GENERATED banner — protects
+        user-authored CLAUDE.md / README / Constitution files from being
+        clobbered when ``project_context_card.md_path`` happens to point at them.
     """
     install_dir = Path(install_dir)
     knowledge_db = install_dir / "knowledge.db"
@@ -310,6 +337,14 @@ def regenerate(
             if md_path is None:
                 raise ValueError(
                     f"project {project!r} has no md_path set on its context card"
+                )
+            if md_path.exists() and not _is_v3_brief(md_path):
+                raise BriefClobberRefused(
+                    f"refusing to overwrite {md_path}: file exists and is not a "
+                    "v3-generated brief (no AUTO-GENERATED banner found in the "
+                    "first 256 bytes). Retarget project_context_card.md_path at "
+                    "a sibling file such as CLAUDE_BRIEF.md so the brief lives "
+                    "alongside the user's content (HR-5 no-clobber)."
                 )
             snapshot_id = snapshot_before_write(install_dir, project, md_path)
             md_path.parent.mkdir(parents=True, exist_ok=True)

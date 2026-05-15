@@ -28,6 +28,18 @@ class BriefBudgetExceeded(RunawayContextError):
     """
 
 
+class BriefClobberRefused(RunawayContextError):
+    """The regenerator refused to overwrite a file that is not a v3-generated brief.
+
+    The brief writer only overwrites files that begin with the v3 AUTO-GENERATED
+    banner. Any other target — a hand-edited project README, a Constitution, an
+    arbitrary CLAUDE.md the user authored — is left untouched and the writer
+    raises this error instead. The fix is to repoint ``project_context_card.md_path``
+    at a sibling file (e.g. ``CLAUDE_BRIEF.md``) so the brief lives alongside the
+    user's content without replacing it (HR-5 no-clobber clause).
+    """
+
+
 class HardDeleteRefused(RunawayContextError):
     """A hard-delete was attempted on a path that does not allow it (HR-3)."""
 
