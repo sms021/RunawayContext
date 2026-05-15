@@ -854,17 +854,58 @@ def cmd_export_markdown(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
-    """Run environment diagnostics and print findings.
+    """Run environment diagnostics and optionally apply fixes.
+
+    Sub-options:
+        --fix-constitution  rewrite ~/CLAUDE.md Session Memory block (prompted, reversible)
+        --fix-memory        rewrite MEMORY.md fetch-detail blocks (prompted, reversible)
+        --fix-mcp           merge runaway-context into ~/.claude/mcp.json (prompted)
+        --fix-hook          wire capture_session.sh into ~/.claude/settings.json (prompted)
+        --fix-all           run every --fix-* in turn
+        --revert <ts>       restore files from a prior fix batch
+        --list-reverts      list available timestamps
+        --yes               skip prompts (still creates backups)
 
     Returns:
-        0 when no FAIL-level findings exist (warnings still allowed).
-        2 when one or more FAIL findings need remediation.
+        0 on success (including no-op fixes); 2 when at least one FAIL
+        finding exists from the read-only diagnostic pass.
     Refuses:
-        Nothing — doctor is read-only.
+        Writing anywhere without a prior backup (see doctor_fix module).
     """
     from runaway_context import doctor as _doctor
+    from runaway_context import doctor_fix as _fix
 
     cfg = _load_config(args)
+
+    if getattr(args, "list_reverts", False):
+        batches = _fix.list_batches()
+        if not batches:
+            print("no doctor backups recorded")
+        else:
+            for ts in batches:
+                print(ts)
+        return EXIT_OK
+
+    if getattr(args, "revert", None):
+        n = _fix.revert(args.revert)
+        return EXIT_OK if n > 0 else EXIT_USAGE
+
+    assume_yes = bool(getattr(args, "yes", False))
+    any_fix_requested = any(
+        getattr(args, attr, False)
+        for attr in ("fix_constitution", "fix_memory", "fix_mcp", "fix_hook", "fix_all")
+    )
+    if any_fix_requested:
+        if args.fix_all or args.fix_constitution:
+            _fix.fix_constitution(assume_yes=assume_yes)
+        if args.fix_all or args.fix_memory:
+            _fix.fix_memory_md(install_dir=cfg.install_dir, assume_yes=assume_yes)
+        if args.fix_all or args.fix_mcp:
+            _fix.fix_mcp(assume_yes=assume_yes)
+        if args.fix_all or args.fix_hook:
+            _fix.fix_capture_hook(install_dir=cfg.install_dir, assume_yes=assume_yes)
+        return EXIT_OK
+
     return _doctor.cli_main(cfg.install_dir, json_output=bool(args.json))
 
 
@@ -955,6 +996,142 @@ def cmd_import(args: argparse.Namespace) -> int:
         print(json.dumps(report, indent=2))
     else:
         print("import OK")
+    return EXIT_OK
+
+
+def cmd_sessions_ingest(args: argparse.Namespace) -> int:
+    """Ingest a single transcript file into ``session_logs`` if guards allow.
+
+    The Stop-hook script ``bin/capture_session.sh`` shells out to this command;
+    so does the cron watcher ``bin/watch_sessions.sh``. The summarizer enforces
+    all nine guardrails inside :func:`runaway_context.session_summary.ingest_transcript`
+    so a malfunctioning hook cannot burn token budget.
+
+    Returns:
+        ``EXIT_OK`` even when a guard fires — the skip reason is printed to
+        stdout (machine-readable as JSON when ``--json`` is set). Failures
+        that should NOT return 0 (transcript path missing, install dir
+        misconfigured) exit non-zero.
+
+    Refuses:
+        Calling the LLM provider when ``summarizer_provider`` is ``"off"``
+        (default) — the row is inserted with ``notes="metadata-only"``. All
+        nine summarizer guards (lock, cooldown, idle, budget, attempt cap,
+        circuit breaker, etc.) live inside ``ingest_transcript``.
+    """
+    from runaway_context import session_summary as ss
+
+    cfg = _load_config(args)
+    transcript = Path(args.transcript).expanduser()
+    if not transcript.exists():
+        _eprint(f"runaway: transcript not found: {transcript}")
+        return EXIT_USAGE
+    result = ss.ingest_transcript(
+        cfg, transcript, force=bool(args.force),
+        project_hint=getattr(args, "project", None),
+    )
+    payload = {
+        "conversation_id": result.conversation_id,
+        "inserted": result.inserted,
+        "skipped_reason": result.skipped_reason,
+        "used_llm": result.used_llm,
+        "tokens_in": result.tokens_in,
+        "tokens_out": result.tokens_out,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload))
+    else:
+        if result.inserted:
+            print(
+                f"inserted conversation_id={result.conversation_id} "
+                f"used_llm={result.used_llm} tokens_in={result.tokens_in} "
+                f"tokens_out={result.tokens_out}"
+            )
+        else:
+            print(
+                f"skipped conversation_id={result.conversation_id} "
+                f"reason={result.skipped_reason}"
+            )
+    return EXIT_OK
+
+
+def cmd_sessions_watch(args: argparse.Namespace) -> int:
+    """Sweep every transcript on disk through the guarded ingester.
+
+    Used by ``bin/watch_sessions.sh`` (cron) and for manual catch-up.
+    ``--once`` is the default; ``--loop`` is reserved for a future watcher
+    daemon but currently behaves the same as ``--once`` (the cron entry point
+    is intentionally the canonical "loop").
+
+    Returns:
+        ``EXIT_OK`` after one sweep; prints a JSON summary.
+
+    Refuses:
+        Nothing of its own — each per-transcript ingest enforces all nine
+        summarizer guards inside ``ingest_transcript`` and never propagates
+        an exception back to this handler.
+    """
+    from runaway_context import session_summary as ss
+
+    cfg = _load_config(args)
+    search_dirs = None
+    if getattr(args, "search_dir", None):
+        search_dirs = [Path(d).expanduser() for d in args.search_dir]
+    summary = ss.ingest_all(cfg, search_dirs=search_dirs, force=bool(args.force))
+    print(json.dumps(summary))
+    return EXIT_OK
+
+
+def cmd_sessions_budget(args: argparse.Namespace) -> int:
+    """Print today's daily-token-budget ledger.
+
+    Returns:
+        ``EXIT_OK``. Output is the JSON snapshot from
+        :func:`runaway_context.budget.get_state`.
+
+    Refuses:
+        Nothing — the ledger is read-only here.
+    """
+    from runaway_context import budget
+
+    cfg = _load_config(args)
+    state = budget.get_state(
+        Path(cfg.install_dir), cap=cfg.summarizer_daily_token_cap,
+    )
+    print(json.dumps(state.to_dict(), indent=2))
+    return EXIT_OK
+
+
+def cmd_import_legacy(args: argparse.Namespace) -> int:
+    """Import knowledge / lessons / sessions from a legacy directory.
+
+    The classic shape is a directory that contains a ``sessions.db`` with the
+    v1 RunawayContext schema OR Steven's hand-rolled "homemade" schema (same
+    table names, different columns). Both are detected and imported with
+    byte-preserving body copies and timestamp preservation. Slug values that
+    aren't snake_case are auto-aliased (e.g. ``runaway-knight`` →
+    ``runaway_knight``) so HR-2 enforcement does not reject the import.
+
+    Returns:
+        ``EXIT_OK`` on success (prints a JSON summary), ``EXIT_USAGE`` when
+        the source directory is missing or has no recognizable layout.
+
+    Refuses:
+        Importing from a source whose schema is unrecognized (returns
+        ``status="unrecognized"`` from the importer rather than raising).
+    """
+    from runaway_context import import_legacy as imp
+
+    cfg = _load_config(args)
+    src = Path(args.from_dir).expanduser()
+    if not src.exists():
+        _eprint(f"runaway: source path does not exist: {src}")
+        return EXIT_USAGE
+    report = imp.run(
+        cfg=cfg, source_dir=src, dry_run=bool(args.dry_run),
+        preserve_timestamps=bool(args.preserve_timestamps),
+    )
+    print(json.dumps(report, indent=2, default=str))
     return EXIT_OK
 
 
@@ -1216,10 +1393,26 @@ def build_parser() -> argparse.ArgumentParser:
     # doctor --------------------------------------------------------------
     p = sub.add_parser(
         "doctor",
-        help="Run environment diagnostics (Python/SQLite/schema/audit/slug/drift).",
+        help="Run environment diagnostics and optionally apply install fixes.",
     )
     p.add_argument("--json", action="store_true",
                    help="Emit findings as JSON for AI consumption.")
+    p.add_argument("--fix-constitution", action="store_true",
+                   help="Rewrite ~/CLAUDE.md Session Memory block to v3 CLI/MCP (prompted, reversible).")
+    p.add_argument("--fix-memory", action="store_true",
+                   help="Rewrite MEMORY.md fetch-detail blocks to v3 commands (prompted, reversible).")
+    p.add_argument("--fix-mcp", action="store_true",
+                   help="Merge runaway-context into ~/.claude/mcp.json (prompted, reversible).")
+    p.add_argument("--fix-hook", action="store_true",
+                   help="Wire capture_session.sh into ~/.claude/settings.json (prompted, reversible).")
+    p.add_argument("--fix-all", action="store_true",
+                   help="Run every --fix-* in turn. Each prompted individually unless --yes.")
+    p.add_argument("--yes", action="store_true",
+                   help="Skip prompts. Backups are still created — revert with --revert <ts>.")
+    p.add_argument("--revert", metavar="TIMESTAMP",
+                   help="Restore files from the named doctor-backups batch.")
+    p.add_argument("--list-reverts", action="store_true",
+                   help="List available revert timestamps under ~/.runaway/doctor-backups/.")
     p.set_defaults(_handler=cmd_doctor)
 
     # uninstall -----------------------------------------------------------
@@ -1310,6 +1503,65 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = mcp_sub.add_parser("serve", help="Run the MCP server over stdio transport.")
     p.set_defaults(_handler=cmd_mcp_serve)
+
+    # sessions -------------------------------------------------------------
+    p_sess = sub.add_parser(
+        "sessions",
+        help="Capture Claude transcripts into session_logs (guarded).",
+    )
+    sess_sub = p_sess.add_subparsers(dest="sessions_command", metavar="<sess_cmd>")
+
+    p = sess_sub.add_parser(
+        "ingest",
+        help="Ingest a single transcript file (used by Stop hook).",
+    )
+    p.add_argument("--transcript", required=True, help="Path to transcript JSONL.")
+    p.add_argument("--project", help="Override project_hint.")
+    p.add_argument(
+        "--force", action="store_true",
+        help="Bypass guards (cooldown, idle, processed marker). Diagnostic use only.",
+    )
+    p.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    p.set_defaults(_handler=cmd_sessions_ingest)
+
+    p = sess_sub.add_parser(
+        "watch",
+        help="Sweep all on-disk transcripts through the guarded ingester.",
+    )
+    p.add_argument(
+        "--once", action="store_true", default=True,
+        help="Run one sweep and exit (default).",
+    )
+    p.add_argument(
+        "--force", action="store_true",
+        help="Bypass guards. Diagnostic only.",
+    )
+    p.add_argument(
+        "--search-dir", action="append", default=None,
+        help="Override the default search root (~/.claude/projects).",
+    )
+    p.set_defaults(_handler=cmd_sessions_watch)
+
+    p = sess_sub.add_parser(
+        "budget", help="Print today's daily-token-budget ledger.",
+    )
+    p.set_defaults(_handler=cmd_sessions_budget)
+
+    # import-legacy --------------------------------------------------------
+    p = sub.add_parser(
+        "import-legacy",
+        help="One-shot importer for v1 RunawayContext OR homemade sessions.py DBs.",
+    )
+    p.add_argument(
+        "--from", dest="from_dir", required=True,
+        help="Source directory (contains sessions.db with v1 or homemade schema).",
+    )
+    p.add_argument("--dry-run", action="store_true", help="Report what would import.")
+    p.add_argument(
+        "--preserve-timestamps", action="store_true", default=True,
+        help="Carry created_at / updated_at from source (default on).",
+    )
+    p.set_defaults(_handler=cmd_import_legacy)
 
     return parser
 

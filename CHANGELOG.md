@@ -7,6 +7,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) �
 
 ---
 
+## [3.1.0] — 2026-05-15
+
+Install-completeness release. v3.0.0 shipped the contract surface; v3.1.0 ships the **install ergonomics** that v3.0.0 expected the adopter's AI to wire by hand. A real install audit (the 2026-05-13 home-machine session) surfaced five distinct gaps; this release closes all of them and adds three more guards no one had asked for yet but which would have prevented one of the failure modes that actually happened.
+
+### Added
+
+- **Conversation logging pipeline** — `bin/capture_session.sh` (Stop-hook target) + `bin/watch_sessions.sh` (cron-based fallback for transports that don't fire Stop hooks, e.g. VS Code) + `src/runaway_context/session_summary.py` (the guarded summarizer they both call). The pipeline mirrors the server's own pattern: one mechanism, every transport, no manual save step. **Nine guardrails** enforced inside `ingest_transcript()`:
+  1. Global flock with timeout (default 300s) — only one summarizer at a time.
+  2. Per-conversation cooldown (default 300s) — same conv can't summarize twice in 5 min.
+  3. Char cap (default 30_000) — transcripts truncated before any model call.
+  4. Pending marker — atomic in-progress flag, removed on done or fail.
+  5. Idle threshold (default 1800s) — never touch active sessions.
+  6. Processed marker — once in `session_logs`, skip forever.
+  7. Attempt cap (default 3) — permanent-fail marker after N failures.
+  8. **Daily token budget ledger** (default 50_000) — `~/_knowledge/budget/YYYY-MM-DD.json`; refuses LLM calls past the daily cap, falls back to metadata-only inserts. New module: `runaway_context.budget`.
+  9. **Circuit breaker** — after 5 consecutive failures, halt all summarization for 1hr and log loudly. Auto-recovers.
+- **`runaway sessions ingest` / `watch` / `budget` CLI** — one-transcript ingest, full-sweep ingest, and a daily-budget snapshot for ops visibility.
+- **`runaway import-legacy --from <dir>`** — one-shot importer for pre-v3 directories. Detects canonical v1 vs. homemade-`sessions.py` layouts. Byte-preserving body copies, original `created_at` / `updated_at`, slug auto-canonicalization (hyphens → underscores) so HR-2 doesn't reject the import.
+- **`runaway doctor --fix-constitution` / `--fix-memory` / `--fix-mcp` / `--fix-hook` / `--fix-all`** — interactive fix flow. Each fix shows a unified diff, prompts the user, writes to `~/.runaway/doctor-backups/<ISO-ts>/` with a `manifest.json`, then applies the change. `runaway doctor --revert <ts>` restores every file in that batch with one command. New module: `runaway_context.doctor_fix`.
+- **Four new doctor read-only checks** — `CONSTITUTION_STALE`, `MEMORY_STALE`, `MCP_WIRING`, `CAPTURE_HOOK`. The `--fix-*` flags wire to each. Doctor's default run now reports the install-completeness state alongside the existing env diagnostics.
+- **`Config` summarizer fields** — `summarizer_provider` (default `"off"` — HR-1 compliant), `summarizer_model`, `summarizer_daily_token_cap`, `summarizer_idle_threshold_sec`, `summarizer_char_cap`, `summarizer_attempt_cap`, `summarizer_cooldown_sec`, `summarizer_lock_timeout_sec`, `summarizer_circuit_break_after`, `summarizer_circuit_recovery_sec`. Every guard knob is config-tunable.
+- **Tests (HR-12)** — `tests/unit/test_session_summary.py` (10 tests, one per guardrail + parsing + discovery), `tests/unit/test_budget.py` (5 tests covering the ledger lifecycle), `tests/unit/test_import_legacy.py` (5 tests for detection + import + dry-run + canonicalization), `tests/unit/test_doctor_fix.py` (9 tests for rewrites + MCP merge + hook wiring + revert).
+
+### Changed
+
+- **`runaway init --non-interactive` now prints a summary.** v3.0.0's non-interactive path was silent, which confused users (no indication of tier, install dir, or where to go next). `init.py` now ends with a one-screen install summary listing every state-bearing file and the recommended next commands (starting with `runaway doctor --fix-all`).
+- **`runaway init` (interactive)** points the user at `runaway doctor --fix-all` for the post-install wiring step — making the MCP/hook/symlink work discoverable rather than expecting the user to find it in docs.
+
+### Notes
+
+- **The summarizer's `provider` defaults to `"off"`** — no LLM calls happen by default (HR-1). Adopters who want Haiku/Sonnet summaries set `summarizer_provider: "claude-cli"` in `config.json`. The metadata-only insert path is always active so `session_logs` still tracks every conversation regardless.
+- **Doctor's revert system is per-batch.** Every `--fix-*` invocation creates one timestamped backup batch; one `--revert <ts>` undoes the entire batch. Multiple sequential fixes create multiple batches; revert them oldest-first if you want partial undo.
+- **The cron entry is opt-in.** `init` does NOT write your crontab. The recommended one-liner is printed on `runaway doctor` so the user can install it themselves with `crontab -e` after reviewing.
+
+---
+
 ## [3.0.1] — 2026-05-15
 
 Data-safety patch. Two distinct paths in v3.0.0 could destroy user content; both are now closed at the code level with contract tests. **Recommended upgrade for every v3.0.0 install** — even one accidental `regen_brief` against a hand-edited project CLAUDE.md can wipe weeks of notes.

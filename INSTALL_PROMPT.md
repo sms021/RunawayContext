@@ -341,13 +341,47 @@ Or your platform's launchd / systemd timer equivalent.
 
 ---
 
+## Session Capture (v3.1.0+)
+
+Every Claude conversation is captured into `sessions.db.session_logs` so prior work is queryable. There are two complementary wiring options — `runaway doctor --fix-hook` installs option A; option B is opt-in.
+
+**A. Stop hook (CLI Claude Code, default).** `runaway doctor --fix-hook` appends `bin/capture_session.sh` to the `Stop` array in `~/.claude/settings.json`. The script reads the event JSON on stdin, extracts `transcript_path`, and spawns `runaway sessions ingest` in the background so Claude never blocks waiting for summarization.
+
+**B. Cron watcher (VS Code, Cursor, anything that doesn't fire Stop hooks).** Schedule `bin/watch_sessions.sh` every 10 minutes:
+
+```cron
+*/10 * * * * /path/to/RunawayContext_v3/bin/watch_sessions.sh
+```
+
+The watcher and the Stop hook share the same guarded code path (`runaway_context.session_summary`), so running both simultaneously is safe — pending markers and processed markers de-duplicate.
+
+### Token-budget guardrails
+
+Every summarization request passes through nine guards before any model call:
+
+| Guard | Default | Knob in `config.json` |
+|---|---|---|
+| Global flock with timeout | 300s | `summarizer_lock_timeout_sec` |
+| Per-conversation cooldown | 300s | `summarizer_cooldown_sec` |
+| Transcript char cap | 30_000 | `summarizer_char_cap` |
+| Idle threshold (skip active sessions) | 1800s | `summarizer_idle_threshold_sec` |
+| Attempt cap → permanent-fail marker | 3 | `summarizer_attempt_cap` |
+| Daily token budget ledger | 50_000 | `summarizer_daily_token_cap` |
+| Circuit breaker (consecutive fails) | 5 | `summarizer_circuit_break_after` |
+| Circuit recovery window | 3600s | `summarizer_circuit_recovery_sec` |
+| LLM provider gate | `"off"` (HR-1) | `summarizer_provider` |
+
+`runaway sessions budget` prints today's ledger. When the daily cap is reached, the summarizer falls back to **metadata-only** inserts — every conversation still lands in `session_logs`; only the LLM-summary `notes` field stays empty until the next UTC day.
+
+---
+
 ## MCP Wiring
 
 The MCP server uses Content-Length framing by default (spec-correct per the MCP standard). For debugging, set `RC_MCP_FRAMING=ndjson` to switch to newline-delimited JSON.
 
 | AI client | How to wire |
 |---|---|
-| **Claude Code** | Add to your `.claude/mcp.json`: `{"runaway-context": {"command": "runaway", "args": ["mcp", "serve"]}}` |
+| **Claude Code** | `runaway doctor --fix-mcp` merges the entry into `~/.claude/mcp.json` (prompted, reversible). Or by hand: `{"mcpServers": {"runaway-context": {"command": "runaway", "args": ["mcp", "serve"]}}}` |
 | **Cursor** | See `.cursor/rules/runaway-retrieval.md` |
 | **Custom client** | Spawn `runaway mcp serve` as a subprocess; speak JSON-RPC 2.0 with Content-Length framing on stdin/stdout |
 

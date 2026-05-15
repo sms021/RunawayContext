@@ -52,6 +52,18 @@ class Config:
     federation_enabled: bool = False
     federation_refresh_minutes: int = 60
     network_opt_in: dict = field(default_factory=dict)
+    # Session capture — opt-out; LLM summarization opt-in (HR-1).
+    session_capture_enabled: bool = True
+    summarizer_provider: str = "off"   # off | claude-cli | anthropic-api | local-ollama
+    summarizer_model: str = "claude-haiku-4-5"
+    summarizer_daily_token_cap: int = 50_000
+    summarizer_idle_threshold_sec: int = 1800   # 30 min — wait until session is "done"
+    summarizer_char_cap: int = 30_000           # truncate transcripts past this
+    summarizer_attempt_cap: int = 3             # max retries before permanent-fail marker
+    summarizer_cooldown_sec: int = 300          # same conv can't summarize twice in 5 min
+    summarizer_lock_timeout_sec: int = 300      # global summarizer lock wait
+    summarizer_circuit_break_after: int = 5     # consecutive fails before halting
+    summarizer_circuit_recovery_sec: int = 3600 # auto-recover after this many seconds
 
     @classmethod
     def load(cls, install_dir: Optional[Path] = None) -> "Config":

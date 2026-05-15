@@ -372,6 +372,7 @@ def run(install_dir: Optional[Path] = None,
             capture_install_manifest(target_dir, tier=tier)
         except ImportError:
             pass  # emit-allowed: uninstall is optional
+        _print_install_summary(cfg, mode="non-interactive")
         return cfg
 
     # ---------------- interactive path ----------------------------------
@@ -496,19 +497,46 @@ def run(install_dir: Optional[Path] = None,
     except ImportError:
         pass  # emit-allowed: uninstall module is optional during partial migrations
 
-    print("")
-    print("Install complete.")
-    print("")
-    print("Next steps:")
-    print(f"  - read {Path(__file__).parent.parent.parent / 'INSTALL_PROMPT.md'}")
-    print("  - try: runaway tier check")
-    print("  - try: runaway brief <slug>     (after you have logged some lessons)")
-    print("  - if this isn't for you: `runaway uninstall --export-markdown PATH`")
-    print("  - try: runaway log-lesson --title 'first lesson' --projects <slug>")
-    if upgrade:
-        print("  - your existing DB was preserved; ran the additive migrator only.")
-    print("")
+    _print_install_summary(cfg, mode="interactive", upgrade=upgrade)
     return cfg
+
+
+def _print_install_summary(cfg: Config, *, mode: str, upgrade: bool = False) -> None:
+    """Print a post-install summary listing every state-bearing file.
+
+    Always prints — even in non-interactive mode — so the user / AI sees
+    exactly where the install lives and what the next step is. (v3.0.0
+    init --non-interactive was silent, which confused first-time installers.)
+    """
+    import shutil as _sh
+
+    print("")
+    print("=" * 56)
+    print(f"  runaway init — {mode} install complete")
+    print("=" * 56)
+    print(f"  install dir : {cfg.install_dir}")
+    print(f"  tier        : {cfg.tier}")
+    print(f"  mcp enabled : {cfg.mcp_enabled}")
+    print(f"  telemetry   : {cfg.telemetry_enabled}  (local-only, no network)")
+    print(f"  knowledge db: {cfg.knowledge_db}")
+    print(f"  sessions db : {cfg.sessions_db}")
+    print(f"  metrics db  : {cfg.metrics_db}")
+    runaway_bin = _sh.which("runaway")
+    print(f"  runaway CLI : {runaway_bin or '(not on PATH — see doctor --fix)'}")
+    if upgrade:
+        print("  upgrade     : in-place additive migration (HR-4)")
+    print("")
+    print("Next steps (RECOMMENDED — each step is reversible):")
+    print("  1. runaway doctor                # one-screen sanity report")
+    print("  2. runaway doctor --fix-all      # wire MCP, hook, MEMORY.md, Constitution")
+    print("                                   # (prompts before each write, all reversible)")
+    print("  3. runaway tier check            # see what the next tier needs")
+    print("")
+    print("Optional:")
+    print("  - runaway import-legacy --from <dir>   # bring in pre-v3 data")
+    print("  - runaway sessions watch               # one-shot transcript ingest")
+    print("  - runaway uninstall --export-markdown PATH   # if this isn't for you")
+    print("")
 
 
 if __name__ == "__main__":  # pragma: no cover

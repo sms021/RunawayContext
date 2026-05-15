@@ -398,7 +398,174 @@ def check_runaway_cli() -> Finding:
     return _warn(
         "RUNAWAY_CLI",
         "runaway not on PATH (you may be running `python -m runaway_context.cli`)",
-        remediation="Run `pip install -e .` from the repo root.",
+        remediation=(
+            "Run `pip install -e .` from the repo root, OR symlink the venv "
+            "binary: `ln -s $(which python | xargs dirname)/runaway "
+            "/usr/local/bin/runaway` (requires sudo)."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# v3.1.0 — install-completeness checks (referenced by `runaway doctor --fix`)
+# ---------------------------------------------------------------------------
+
+
+_STALE_CONSTITUTION_TOKENS = (
+    "python3 _knowledge/sessions.py",
+    "python3 ~/_knowledge/sessions.py",
+    "_knowledge/sessions.py --save",
+    "_knowledge/sessions.py --ks-get",
+)
+
+
+def check_constitution_stale_paths() -> Finding:
+    """Scan ``~/CLAUDE.md`` for references to the pre-v3 sessions.py CLI.
+
+    A v2-era Constitution told its AI to invoke ``python3 _knowledge/sessions.py
+    --context "X"`` — that script is gone in v3 (replaced by ``runaway brief``
+    and ``runaway search``). If those tokens are still in the Constitution, the
+    next Claude will issue commands that fail.
+
+    Returns:
+        OK if Constitution is absent or has no stale tokens; WARN otherwise.
+    """
+    path = Path.home() / "CLAUDE.md"
+    if not path.exists():
+        return _ok("CONSTITUTION_STALE", "no ~/CLAUDE.md (nothing to scan)")
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return _warn(
+            "CONSTITUTION_STALE", f"~/CLAUDE.md unreadable",
+            remediation="Check permissions on the file.",
+        )
+    hits = [tok for tok in _STALE_CONSTITUTION_TOKENS if tok in text]
+    if not hits:
+        return _ok("CONSTITUTION_STALE", "~/CLAUDE.md has no stale v2 CLI references")
+    return _warn(
+        "CONSTITUTION_STALE",
+        f"~/CLAUDE.md references the pre-v3 sessions.py CLI ({len(hits)} tokens)",
+        remediation=(
+            "Run `runaway doctor --fix-constitution` to rewrite the Session "
+            "Memory block to point at the `runaway` CLI / MCP tools. The "
+            "rewrite is backed up to ~/.runaway/doctor-backups/ and "
+            "reversible with `runaway doctor --revert <timestamp>`."
+        ),
+        path=str(path), stale_tokens=hits,
+    )
+
+
+def check_memory_md_stale_paths(install_dir: Optional[Path] = None) -> Finding:
+    """Scan auto-memory MEMORY.md for pre-v3 ``sessions.py --ks-get`` references.
+
+    Returns:
+        OK when no auto-memory dir or no stale tokens; WARN otherwise.
+    """
+    home = Path.home()
+    candidates: List[Path] = [
+        home / ".claude" / "projects" / "memory" / "MEMORY.md",
+    ]
+    # Scan all per-project memory dirs as well
+    proj_root = home / ".claude" / "projects"
+    if proj_root.exists():
+        candidates.extend(proj_root.rglob("memory/MEMORY.md"))
+    candidates = sorted({c for c in candidates if c.exists()})
+    stale: List[str] = []
+    for p in candidates:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(tok in text for tok in _STALE_CONSTITUTION_TOKENS):
+            stale.append(str(p))
+    if not stale:
+        return _ok("MEMORY_STALE", "no MEMORY.md files reference pre-v3 CLI")
+    return _warn(
+        "MEMORY_STALE",
+        f"{len(stale)} MEMORY.md file(s) reference the pre-v3 sessions.py CLI",
+        remediation=(
+            "Run `runaway doctor --fix-memory` to rewrite each MEMORY.md's "
+            "trailing 'How to fetch detail' block. Backed up to "
+            "~/.runaway/doctor-backups/ and reversible."
+        ),
+        files=stale,
+    )
+
+
+def check_mcp_wiring() -> Finding:
+    """Verify ``~/.claude/mcp.json`` lists the runaway-context server.
+
+    Returns:
+        OK when the entry is present; WARN otherwise.
+    """
+    import json as _json
+
+    path = Path.home() / ".claude" / "mcp.json"
+    if not path.exists():
+        return _warn(
+            "MCP_WIRING",
+            "~/.claude/mcp.json does not exist (Claude Code cannot load the MCP server)",
+            remediation=(
+                "Run `runaway doctor --fix-mcp` to create mcp.json with the "
+                "runaway-context server entry."
+            ),
+        )
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError):
+        return _warn(
+            "MCP_WIRING", f"{path} is malformed JSON",
+            remediation="Repair the file by hand or rerun `runaway doctor --fix-mcp`.",
+        )
+    servers = data.get("mcpServers") or data.get("servers") or {}
+    if "runaway-context" in servers:
+        return _ok("MCP_WIRING", f"runaway-context server wired in {path}")
+    return _warn(
+        "MCP_WIRING",
+        f"{path} exists but has no `runaway-context` entry",
+        remediation="Run `runaway doctor --fix-mcp` to merge in the entry.",
+    )
+
+
+def check_capture_hook(cfg: Config) -> Finding:
+    """Verify the Stop-hook script is registered in ``~/.claude/settings.json``.
+
+    Returns:
+        OK when a hook line references either capture_session.sh or a
+        runaway-installed equivalent; WARN otherwise.
+    """
+    import json as _json
+
+    settings = Path.home() / ".claude" / "settings.json"
+    if not settings.exists():
+        return _warn(
+            "CAPTURE_HOOK",
+            "~/.claude/settings.json missing — no Stop hook can fire",
+            remediation="Run `runaway doctor --fix-hook` to install the Stop hook.",
+        )
+    try:
+        data = _json.loads(settings.read_text(encoding="utf-8"))
+    except (OSError, _json.JSONDecodeError):
+        return _warn(
+            "CAPTURE_HOOK", f"{settings} is malformed JSON",
+            remediation="Repair by hand or rerun `runaway doctor --fix-hook`.",
+        )
+    hooks = data.get("hooks") or {}
+    stop = hooks.get("Stop") or []
+    found = False
+    for group in stop:
+        for hook in group.get("hooks", []) or []:
+            cmd = (hook.get("command") or "")
+            if "capture_session.sh" in cmd or "runaway" in cmd and "sessions" in cmd:
+                found = True
+                break
+    if found:
+        return _ok("CAPTURE_HOOK", "Stop hook wired for session capture")
+    return _warn(
+        "CAPTURE_HOOK",
+        f"{settings} has no Stop hook for session capture",
+        remediation="Run `runaway doctor --fix-hook` to wire capture_session.sh.",
     )
 
 
@@ -424,6 +591,10 @@ def run_diagnostics(install_dir: Optional[Path] = None) -> List[Finding]:
         check_sqlite_vec(),
         check_runaway_cli(),
         check_install_dir(cfg),
+        check_constitution_stale_paths(),
+        check_memory_md_stale_paths(install_dir),
+        check_mcp_wiring(),
+        check_capture_hook(cfg),
     ]
     # Schema-dependent checks only fire when the DB exists.
     if cfg.knowledge_db and Path(cfg.knowledge_db).exists():
