@@ -18,21 +18,30 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 
 
-_FTS_SANITIZE = re.compile(r"[^A-Za-z0-9_\-\s]")
+_FTS_PHRASE_BREAK = re.compile(r'["\x00]')
 
 
 def _sanitize_query(query: str) -> str:
-    """Strip FTS5 punctuation that would otherwise be parsed as operators.
+    """Convert a free-text query into a safe FTS5 MATCH expression.
+
+    Each whitespace-delimited token is wrapped in double quotes, so it is
+    parsed by FTS5 as a literal phrase. This neutralises every MATCH-level
+    operator (``-``, ``:``, ``*``, ``+``, ``^``, ``AND/OR/NOT``,
+    ``column:term``) that would otherwise be interpreted inside a token —
+    a parameterised ``:q`` binding is safe against SQL injection but does
+    NOT protect against FTS5's own query-language parser.
 
     Returns:
-        A whitespace-trimmed query string safe to pass to MATCH.
+        A whitespace-joined sequence of phrase-quoted tokens, suitable for
+        passing as the right-hand side of ``MATCH :param``.
 
     Refuses:
         Returning an empty result when the caller passed a non-empty input
         — the caller's check happens above. This is pure scrub.
     """
-    cleaned = _FTS_SANITIZE.sub(" ", query)
-    return " ".join(cleaned.split())
+    cleaned = _FTS_PHRASE_BREAK.sub(" ", query)
+    tokens = cleaned.split()
+    return " ".join(f'"{t}"' for t in tokens)
 
 
 def _project_tag_filter(project: Optional[str], alias: str = "") -> str:
