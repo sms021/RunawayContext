@@ -219,6 +219,36 @@ def test_archive_install_skips_system_root_paths(ready_install, tmp_path, monkey
     with tarfile.open(str(out)) as tf:
         names = tf.getnames()
     assert not any("etc/passwd" in n for n in names)
+    # Symlink-resolved form must also be excluded — on macOS /etc resolves
+    # to /private/etc, so a naive '/etc/'-prefix block would silently miss
+    # Path('/etc/passwd').resolve() == '/private/etc/passwd'.
+    assert not any("private/etc/passwd" in n for n in names)
+
+
+def test_archive_install_blocks_macos_resolved_system_paths(ready_install, tmp_path):
+    """Pre-resolved /private/* system paths must also be refused.
+
+    Guards against the symlink-bypass class of bugs where a path is sanitised
+    in one form (``/etc/passwd``) but the resolver returns a different form
+    (``/private/etc/passwd`` on macOS) that the rail forgot about.
+    """
+    import sqlite3
+    conn = sqlite3.connect(str(ready_install / "knowledge.db"))
+    try:
+        for evil in ("/private/etc/passwd", "/etc/ssh/ssh_host_rsa_key"):
+            conn.execute(
+                "INSERT OR REPLACE INTO project_context_card "
+                "(project, md_path, md_line_cap) VALUES (?, ?, ?)",
+                (f"evil_{evil.replace('/', '_')}", evil, 150),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    out = archive_install(ready_install, tmp_path / "archives")
+    with tarfile.open(str(out)) as tf:
+        names = tf.getnames()
+    assert not any("etc/passwd" in n for n in names)
+    assert not any("ssh_host_rsa_key" in n for n in names)
 
 
 def test_archive_install_includes_modified_files_from_manifest(ready_install, tmp_path):
