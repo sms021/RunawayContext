@@ -34,31 +34,63 @@ Follow this procedure exactly. Do not summarize it back to me — execute it.
    If any test fails, STOP. Report the test name, the rule it enforces,
    the failure message, and what you tried. Do not mark install complete.
 
-6. Run the diagnostic doctor:
-       runaway doctor --json
+6. DISCOVER any existing knowledge / context system on this host BEFORE
+   creating a fresh install. The install location matters: my data may
+   live somewhere other than the default ~/_knowledge (homemade KS at
+   /var/www/html/_KnowledgeStore, prior RC install at a custom path,
+   etc.). Run:
+       runaway doctor --scan --json
+   This walks ~, /var/www/html, /srv, /opt for knowledge.db files and
+   classifies each one's shape (v3 / v2 / v1 / foreign / partial). Show
+   me the result before deciding the install dir.
+
+   If exactly one candidate is found and you intend to use it as the
+   target, pass --install-dir <that-path> to every subsequent runaway
+   command in this prompt. If zero candidates are found, ~/_knowledge is
+   the safe default. If multiple are found, ask me which one is the
+   intended target before proceeding.
+
+7. Run the diagnostic doctor (pointing at the chosen install dir):
+       runaway doctor --install-dir <dir> --json
    Read the findings array. For every entry with level "fail", apply the
    `remediation` string. For every entry with level "warn", decide whether
    it is relevant to my use case (you have permission to install optional
    modules with my approval; you do not have permission to enable network
    egress without explicit confirmation from me).
 
-7. Choose the right tier WITH ME using the decision tree below
+   Note: --fix-mcp MERGES into ~/.claude/mcp.json. It does NOT overwrite
+   existing server entries; runaway-context joins them.
+
+8. Choose the right tier WITH ME using the decision tree below
    ("Choosing the Right Tier"). Do not pick T2+ by default.
 
-8. Run the wizard:
-       runaway init
+9. Run the wizard:
+       runaway init --install-dir <dir>
    When it asks tier-selection questions, walk me through the recommendation
-   it gives. If you have already chosen a tier with me in step 7, accept
+   it gives. If you have already chosen a tier with me in step 8, accept
    the recommendation if it matches; otherwise override and explain.
 
-9. Configure tier-appropriate integrations (see "Per-Tier Integration
-   Checklist" below). Do not enable features for a tier higher than mine.
+10. If step 6 discovered an existing v1/v2/foreign install and I confirmed
+    I want its data brought into v3, ALSO run:
+        runaway adopt --target-install-dir <dir> --apply
+    This is the one-shot adoption flow (new in v3.3.3). It:
+      a. re-scans for candidate DBs and recommends migrate/import-legacy
+         per shape;
+      b. ingests Claude Code per-project auto-memory MDs into the KS;
+      c. ingests hand-edited CLAUDE.md / AGENTS.md / .cursor/rules into
+         knowledge_chunks (rewritten as pointer indexes after the pass);
+      d. regenerates per-project MEMORY.md as a tag-rich pointer index.
+    Each step is independently idempotent. Run with --apply omitted first
+    if I want a dry-run preview.
 
-10. Re-run `runaway doctor` once everything is wired up. Confirm zero
+11. Configure tier-appropriate integrations (see "Per-Tier Integration
+    Checklist" below). Do not enable features for a tier higher than mine.
+
+12. Re-run `runaway doctor` once everything is wired up. Confirm zero
     FAIL findings before declaring the install complete. WARN findings
     are acceptable if I have explicitly accepted them.
 
-11. Report: my chosen tier, the next promotion gate, and any WARN findings
+13. Report: my chosen tier, the next promotion gate, and any WARN findings
     I should know about.
 
 Hard rules of the install:
@@ -177,27 +209,42 @@ See [MIGRATION_V2_TO_V3.md](MIGRATION_V2_TO_V3.md) for the full upgrade walkthro
 **Concrete v2-upgrade prompt** (drop-in alternative to the canonical prompt above):
 
 ```
-I have RunawayContext v2 installed at ~/_knowledge on this machine. I want
+I have RunawayContext v2 installed on this machine somewhere. I want
 to upgrade to v3 from <repo URL>.
 
 1. Clone v3 to a fresh location (do NOT overwrite my v2 install).
 2. cd into the v3 checkout and `pip install --user -e ".[dev]"`.
 3. Read docs/HARD_RULES.md and MIGRATION_V2_TO_V3.md.
-4. Run `runaway doctor --install-dir ~/_knowledge --json`.
+4. DISCOVER my v2 install path — do not assume ~/_knowledge:
+       runaway doctor --scan --json
+   Find the candidate with shape "v2". Save that path as <V2_DIR> for the
+   remaining steps. If multiple v2 candidates appear, ask me which.
+   If a "foreign" or "partial" candidate appears instead of "v2", that means
+   I have a homemade KS (e.g. /var/www/html/_KnowledgeStore) — use the
+   import-legacy path below rather than db migrate.
+5. Run `runaway doctor --install-dir <V2_DIR> --json`.
    You should see [V2_DB_UNUPGRADED] as one FAIL finding. That is expected.
-5. Run `runaway db migrate --knowledge-db ~/_knowledge/knowledge.db \
-       --sessions-db ~/_knowledge/sessions.db \
-       --metrics-db ~/_knowledge/metrics.db`.
+6. Run `runaway db migrate --knowledge-db <V2_DIR>/knowledge.db \
+       --sessions-db <V2_DIR>/sessions.db \
+       --metrics-db <V2_DIR>/metrics.db`.
    Confirm the migrator reports `aborted_reason: None` and shows the new
    columns it added per table.
-6. Re-run `runaway doctor`. The V2_DB_UNUPGRADED finding must be gone.
-7. Run `runaway init --non-interactive` so the wizard registers my opaque
-   install_id and writes a minimal config.json (no overwrites).
-   Then run `runaway init` interactively only if I tell you to walk the
-   tier-recommendation flow with me.
-8. Run `pytest -m contract` from the v3 checkout to verify the contracts hold.
-9. Report: row counts before/after for knowledge_chunks and lessons_learned,
-   the doctor's current state, and the recommended tier.
+   (FOREIGN/PARTIAL alternative: instead of db migrate, run
+   `runaway import-legacy --from <V2_DIR>` to copy rows into a fresh v3
+   install at ~/_knowledge, leaving the homemade DB untouched.)
+7. Re-run `runaway doctor --install-dir <V2_DIR>`. The V2_DB_UNUPGRADED
+   finding must be gone.
+8. Run `runaway init --install-dir <V2_DIR> --non-interactive` so the
+   wizard registers my opaque install_id and writes a minimal config.json
+   (no overwrites). Then run `runaway init` interactively only if I tell
+   you to walk the tier-recommendation flow with me.
+9. Run `runaway adopt --target-install-dir <V2_DIR> --apply` to ingest any
+   Claude Code per-project memory MDs and hand-edited CLAUDE.md /
+   AGENTS.md / .cursor/rules into the KS. Each step is idempotent.
+10. Run `PYTHONPATH=src pytest -m contract` from the v3 checkout to verify
+    the contracts hold.
+11. Report: row counts before/after for knowledge_chunks and lessons_learned,
+    the doctor's current state, and the recommended tier.
 ```
 
 ---

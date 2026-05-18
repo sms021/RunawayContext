@@ -275,18 +275,27 @@ def rewrite_as_pointer(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_project_slug(memdir: Path, client) -> Optional[str]:
+def _resolve_project_slug(
+    memdir: Path, client, *, explicit_map: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
     """Pick the canonical slug for *memdir*.
 
     The per-project memory dir lives at ``~/.claude/projects/<dash-name>/memory``
     where ``<dash-name>`` is Claude Code's munged form of an absolute path
-    (e.g. ``-var-www-html``). We map that back to a canonical slug by:
+    (e.g. ``-var-www-html``). We map that back to a canonical slug in order:
 
-    1. Checking ``slug_registry`` for an exact match on the dir name.
-    2. Falling back to the rightmost path segment (``html`` -> try registry).
-    3. Returning ``None`` if no match - the caller emits an ERROR record.
+    1. Explicit user-supplied map (``--map <dirname>=<slug>``) — exact match
+       on the directory name wins, no heuristic fallback.
+    2. The dir name as-is against ``slug_registry``.
+    3. The dedashed/underscored form.
+    4. The rightmost path segment (e.g. ``html`` from ``-var-www-html``).
+
+    Returns:
+        Canonical slug or ``None`` if nothing matched.
     """
     name = memdir.parent.name
+    if explicit_map and name in explicit_map:
+        return explicit_map[name]
     try:
         from runaway_context._slugs import canonicalize_slug
     except ImportError:
@@ -336,8 +345,19 @@ def _find_existing_row(client, table: str, project: str, title: str) -> Optional
         conn.close()
 
 
-def ingest_one(path: Path, client, *, dry_run: bool = False) -> IngestRecord:
+def ingest_one(
+    path: Path, client, *,
+    dry_run: bool = False,
+    explicit_map: Optional[Dict[str, str]] = None,
+) -> IngestRecord:
     """Ingest one memory MD into the DB and rewrite it as a pointer.
+
+    Args:
+        path: the source MD file.
+        client: a live :class:`Client`.
+        dry_run: parse + classify only; touch nothing.
+        explicit_map: optional ``{dirname: slug}`` overriding the slug
+            heuristic for the dir containing *path*.
 
     Returns:
         :class:`IngestRecord` describing what happened. The function does NOT
@@ -365,7 +385,7 @@ def ingest_one(path: Path, client, *, dry_run: bool = False) -> IngestRecord:
     description = str(fm.get("description") or name).strip()
     table = TYPE_TO_TABLE.get(mtype, "knowledge_chunks")
 
-    project = _resolve_project_slug(path.parent, client)
+    project = _resolve_project_slug(path.parent, client, explicit_map=explicit_map)
     if not project:
         return IngestRecord(
             path=path, action="error",
@@ -423,6 +443,7 @@ def ingest_all(
     claude_projects_root: Optional[Path] = None,
     project_filter: Optional[str] = None,
     dry_run: bool = False,
+    explicit_map: Optional[Dict[str, str]] = None,
 ) -> IngestReport:
     """Walk every per-project memory dir and ingest each sibling MD.
 
@@ -431,6 +452,10 @@ def ingest_all(
         claude_projects_root: override ``~/.claude/projects`` (for tests).
         project_filter: only process memory dirs whose canonical slug matches.
         dry_run: report what would happen without writing to DB or disk.
+        explicit_map: optional ``{dirname: slug}`` user-supplied mapping that
+            wins over the slug-resolution heuristic. Use this when the
+            auto-detected slug would be wrong (e.g., two project dirs whose
+            heuristic both resolve to the same registry slug).
 
     Returns:
         :class:`IngestReport` aggregating one record per file processed.
@@ -438,10 +463,12 @@ def ingest_all(
     report = IngestReport(dry_run=dry_run)
     for memdir in discover_memory_dirs(claude_projects_root):
         if project_filter is not None:
-            slug = _resolve_project_slug(memdir, client)
+            slug = _resolve_project_slug(memdir, client, explicit_map=explicit_map)
             if slug != project_filter:
                 continue
         for md_path in discover_memory_mds(memdir):
-            rec = ingest_one(md_path, client, dry_run=dry_run)
+            rec = ingest_one(
+                md_path, client, dry_run=dry_run, explicit_map=explicit_map,
+            )
             report.records.append(rec)
     return report
