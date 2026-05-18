@@ -417,7 +417,29 @@ def _external_brief_paths(install_dir: Path) -> List[Path]:
         rows = []
     finally:
         conn.close()
-    blocked_roots = ("/etc/", "/usr/", "/var/", "/bin/", "/sbin/", "/sys/", "/proc/")
+    # System-root prefixes that md_path must NOT resolve into. Include each
+    # root's symlink-resolved form too — on macOS '/etc' resolves to
+    # '/private/etc', so a raw '/etc/' prefix check silently misses
+    # Path('/etc/passwd').resolve(). Note we deliberately do NOT block
+    # '/var' or '/private/var' as a whole: macOS hosts user-owned temp
+    # dirs under '/private/var/folders/...' and legitimate project briefs
+    # may live there (e.g. pytest tmp_path). Sensitive '/var' subtrees are
+    # listed explicitly instead.
+    _root_seeds = (
+        "/etc", "/usr/bin", "/usr/sbin", "/usr/libexec", "/bin", "/sbin",
+        "/sys", "/proc", "/root",
+        "/var/db", "/var/log", "/var/root", "/var/mail", "/var/spool",
+    )
+    _root_prefixes: List[str] = []
+    for root in _root_seeds:
+        rp = Path(root)
+        _root_prefixes.append(str(rp) + "/")
+        try:
+            resolved_root = str(rp.resolve()) + "/"
+            if resolved_root not in _root_prefixes:
+                _root_prefixes.append(resolved_root)
+        except (OSError, RuntimeError):
+            pass
     for (md_path,) in rows:
         p = Path(md_path).expanduser().resolve()
         # Skip files inside the install dir (already covered by the dir add).
@@ -426,7 +448,8 @@ def _external_brief_paths(install_dir: Path) -> List[Path]:
             continue
         except ValueError:
             pass  # not under install dir — keep going
-        if any(str(p).startswith(root) for root in blocked_roots):
+        p_str = str(p)
+        if any(p_str.startswith(root) for root in _root_prefixes):
             continue
         if p.exists() and p.is_file():
             paths.append(p)
