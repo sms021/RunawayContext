@@ -101,6 +101,8 @@ $EDITOR ~/.claude/CLAUDE.md       # or AGENTS.md / .cursor/rules / etc.
 # 6. Create the Tier 2 pointer file
 $EDITOR ~/.claude/memory/MEMORY.md
 # Keep ≤50 lines. Each line is one pointer: LL#N — short hook
+# See "Pointer-MD contract" below — MEMORY.md and its siblings hold
+# pointers only; detail content lives in knowledge.db.
 
 # 7. Wire up the drift detector
 ln -s ~/RunawayContext_v3/bin/check_md_drift.sh ~/.claude/hooks/Stop/check_md_drift.sh
@@ -393,6 +395,43 @@ runaway config show --network
 ```
 
 If any of these fail, the tier is not honored. The AI's install report at that point should say what failed and what was tried — not "everything is working."
+
+---
+
+## Pointer-MD contract (Tier 2 + every per-project memory dir)
+
+**Rule:** every `MEMORY.md` and every sibling MD inside a `~/.claude/projects/<proj>/memory/` directory holds **pointers only** — no detail content. Detail lives in `knowledge.db`.
+
+A pointer index line looks like:
+
+```
+- LL#467 — Editing config.php rewrites the ACL mask; chmod 640 + chgrp www-data + setfacl
+- rule#15665 — AHJ writers must use eh_ctx_patch(), never UPDATE resolved_context directly
+- KC#15689 — AHJ orchestrator BG worker pattern (setsid + 8-phase pipeline)
+```
+
+A pointer **stub file** (a sibling MD that was once a Claude Code auto-memory file and has been ingested) looks like:
+
+```yaml
+---
+name: no-mocks-in-integration-tests
+description: don't mock the DB in integration tests
+metadata:
+  type: pointer
+  db_table: lessons_learned
+  db_row_id: 467
+---
+See knowledge.db `lessons_learned` row 467.
+```
+
+**How to keep the contract:**
+
+- Sibling MDs that Claude Code's auto-memory subsystem writes (`feedback_*.md`, `project_*.md`, `reference_*.md`, `user_*.md`) get ingested with `runaway memory ingest`. The importer rewrites each one as a pointer stub; the body is now in the DB.
+- The doctor check `MEMORY_ORPHANS` flags any non-pointer sibling. Run `runaway memory ingest --dry-run` to preview, then drop `--dry-run` to apply.
+- `MEMORY.md` itself is regenerated from the DB with `runaway brief rewrite-pointers`. The command refuses to touch a hand-edited file (HR-5 no-clobber — looks for an `AUTO-GENERATED` marker in the first 256 bytes).
+- Detail edits happen in the DB via `runaway log-lesson` / `propose-knowledge` / the MCP `propose_lesson_draft` flow. Never hand-edit pointer stubs to add content — the edit is invisible to search and the next ingest pass would overwrite it.
+
+**Why it matters:** without the contract, content lives in two places (file + DB) and drifts. Search returns one version, the brief generator another. The contract makes the DB authoritative and the files visible-but-thin pointers.
 
 ---
 

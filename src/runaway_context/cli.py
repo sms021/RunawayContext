@@ -413,6 +413,83 @@ def cmd_brief_preview(args: argparse.Namespace) -> int:
         return EXIT_OK
 
 
+def cmd_brief_rewrite_pointers(args: argparse.Namespace) -> int:
+    """Rewrite Claude Code per-project ``MEMORY.md`` files as pointer-only indexes.
+
+    For every per-project memory dir, this regenerates ``MEMORY.md`` from the
+    DB rows currently linked under the canonical slug (lessons + chunks),
+    emitting one ``- LL#N — hook`` or ``- KC#N — hook`` line per row.
+
+    Returns:
+        ``EXIT_OK`` always. Per-project failures are surfaced in the JSON
+        report rather than raising.
+
+    Refuses:
+        Writing into directories whose canonical slug cannot be resolved.
+        Touching files whose first 256 bytes contain a hand-written marker
+        (HR-5 no-clobber); we only rewrite files Claude or RunawayContext
+        previously generated.
+    """
+    from runaway_context import memory_ingest as mi
+    from runaway_context.client import Client
+
+    cfg = _load_config(args)
+    client = Client(install_dir=cfg.install_dir)
+    claude_root = Path(args.claude_root).expanduser() if args.claude_root else None
+    report = {
+        "dry_run": bool(args.dry_run),
+        "files_rewritten": [],
+        "files_skipped": [],
+    }
+    for memdir in mi.discover_memory_dirs(claude_projects_root=claude_root):
+        slug = mi._resolve_project_slug(memdir, client)  # noqa: SLF001
+        index = memdir / "MEMORY.md"
+        if slug is None:
+            report["files_skipped"].append(
+                {"path": str(index), "reason": "unresolved slug"}
+            )
+            continue
+        # HR-5: only rewrite files whose head looks like a previously-generated
+        # pointer index, not user-authored prose.
+        if index.exists():
+            head = index.read_text(encoding="utf-8", errors="replace")[:256]
+            if "AUTO-GENERATED" not in head and "pointer index" not in head.lower():
+                report["files_skipped"].append(
+                    {"path": str(index), "reason": "hand-edited (HR-5)"}
+                )
+                continue
+        lines = [
+            "<!-- AUTO-GENERATED: runaway brief rewrite-pointers -->",
+            "# MEMORY.md — pointer index",
+            "",
+        ]
+        import sqlite3
+        conn = sqlite3.connect(str(client._knowledge_db))
+        try:
+            for rid, title in conn.execute(
+                "SELECT id, title FROM lessons_learned "
+                "WHERE project = ? AND deleted_at IS NULL ORDER BY id",
+                (slug,),
+            ):
+                hook = (title or "").strip().splitlines()[0][:120]
+                lines.append(f"- LL#{rid} — {hook}")
+            for rid, title in conn.execute(
+                "SELECT id, title FROM knowledge_chunks "
+                "WHERE project = ? AND deleted_at IS NULL ORDER BY id",
+                (slug,),
+            ):
+                hook = (title or "").strip().splitlines()[0][:120]
+                lines.append(f"- KC#{rid} — {hook}")
+        finally:
+            conn.close()
+        content = "\n".join(lines) + "\n"
+        if not args.dry_run:
+            index.write_text(content)
+        report["files_rewritten"].append(str(index))
+    print(json.dumps(report, indent=2))
+    return EXIT_OK
+
+
 def cmd_brief_rollback(args: argparse.Namespace) -> int:
     """Restore a project brief from a snapshot in ``brief_snapshots``.
 
@@ -582,6 +659,43 @@ def cmd_db_migrate(args: argparse.Namespace) -> int:
     if report.aborted_reason:
         _eprint(f"runaway: migration aborted — {report.aborted_reason}")
         return EXIT_REFUSED
+    return EXIT_OK
+
+
+def cmd_db_import_data_map(args: argparse.Namespace) -> int:
+    """Parse a markdown data-map file and register sources into ``data_sources``.
+
+    Tolerant parser: scans every markdown table and acts on any whose headers
+    name a ``system`` and ``name`` (or recognised synonyms). The migrator
+    never auto-runs this — it must be explicit because the markdown is
+    free-form and the importer may misclassify edge cases.
+
+    Returns:
+        ``EXIT_OK`` always; the JSON report enumerates skipped rows.
+
+    Refuses:
+        Nothing at the CLI layer. The underlying parser records per-row
+        skips in ``ImportReport.notes`` rather than raising.
+    """
+    from runaway_context.cross_system import import_from_markdown
+
+    cfg = _load_config(args)
+    md = Path(args.from_file).expanduser()
+    report = import_from_markdown(
+        Path(cfg.knowledge_db), md,
+        default_kind=args.default_kind,
+        project=args.project,
+        dry_run=bool(args.dry_run),
+    )
+    out = {
+        "dry_run": bool(args.dry_run),
+        "sources_added": report.sources_added,
+        "sources_skipped": report.sources_skipped,
+        "mappings_added": report.mappings_added,
+        "mappings_skipped": report.mappings_skipped,
+        "notes": report.notes[:40],
+    }
+    print(json.dumps(out, indent=2))
     return EXIT_OK
 
 
@@ -1102,6 +1216,104 @@ def cmd_sessions_budget(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_multiuser_provision(args: argparse.Namespace) -> int:
+    """Provision RunawayContext for every Claude user on a shared host.
+
+    For each candidate user (UID >= ``--min-uid``, has ``~/.claude``), runs
+    ``runaway doctor --fix-all --yes`` under that user's identity. Errors per
+    user are encoded in the JSON report — the sweep does not abort on first
+    failure.
+
+    Returns:
+        ``EXIT_OK`` always; non-zero per-user doctor returncodes appear in
+        the report. The caller is expected to inspect the JSON.
+
+    Refuses:
+        Root (UID 0) target unless explicitly named via ``--user``.
+    """
+    from runaway_context import multiuser
+
+    usernames = list(args.user) if args.user else None
+    extra: List[str] = []
+    if args.runaway_install_dir:
+        extra.extend(["--install-dir", args.runaway_install_dir])
+    report = multiuser.provision_all(
+        usernames=usernames, dry_run=bool(args.dry_run),
+        extra_doctor_args=extra, min_uid=args.min_uid,
+    )
+    print(json.dumps(multiuser.report_to_dict(report), indent=2, default=str))
+    return EXIT_OK
+
+
+def cmd_multiuser_list(args: argparse.Namespace) -> int:
+    """List Claude-eligible users on this host without provisioning.
+
+    Returns:
+        ``EXIT_OK`` always; prints a JSON array.
+
+    Refuses:
+        Nothing — read-only discovery.
+    """
+    from runaway_context import multiuser
+
+    profiles = multiuser.enumerate_users(min_uid=args.min_uid)
+    out = [
+        {
+            "username": p.username, "uid": p.uid,
+            "home": str(p.home), "has_claude_dir": p.has_claude_dir,
+        }
+        for p in profiles
+    ]
+    print(json.dumps(out, indent=2))
+    return EXIT_OK
+
+
+def cmd_memory_ingest(args: argparse.Namespace) -> int:
+    """Ingest Claude Code auto-memory sibling MDs into the Knowledge Store.
+
+    Walks ``~/.claude/projects/<slug>/memory/``, parses each non-``MEMORY.md``
+    file's frontmatter, inserts into ``knowledge_chunks`` or ``lessons_learned``
+    based on ``metadata.type``, and rewrites the file as a pointer stub.
+
+    Idempotent: re-running over a tree that's already been ingested only
+    touches files whose source content has reverted to non-pointer form.
+
+    Returns:
+        ``EXIT_OK`` on success (prints a JSON summary).
+
+    Refuses:
+        Per-file errors are encoded in the report; sweep continues past bad files.
+    """
+    from runaway_context import memory_ingest as mi
+    from runaway_context.client import Client
+
+    cfg = _load_config(args)
+    client = Client(install_dir=cfg.install_dir)
+    root = Path(args.claude_root).expanduser() if args.claude_root else None
+    report = mi.ingest_all(
+        client,
+        claude_projects_root=root,
+        project_filter=args.project,
+        dry_run=bool(args.dry_run),
+    )
+    out = {
+        "dry_run": report.dry_run,
+        "counts": report.counts(),
+        "records": [
+            {
+                "path": str(r.path),
+                "action": r.action,
+                "table": r.table,
+                "row_id": r.row_id,
+                "detail": r.detail,
+            }
+            for r in report.records
+        ],
+    }
+    print(json.dumps(out, indent=2, default=str))
+    return EXIT_OK
+
+
 def cmd_import_legacy(args: argparse.Namespace) -> int:
     """Import knowledge / lessons / sessions from a legacy directory.
 
@@ -1318,6 +1530,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project")
     p.set_defaults(_handler=cmd_brief_preview)
 
+    # brief-rewrite-pointers ----------------------------------------------
+    p = sub.add_parser(
+        "brief-rewrite-pointers",
+        help="Rewrite per-project MEMORY.md as pointer-only indexes.",
+    )
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--claude-root", default=None,
+                   help="Override ~/.claude/projects (for tests/alt installs).")
+    p.set_defaults(_handler=cmd_brief_rewrite_pointers)
+
     # brief-rollback -------------------------------------------------------
     p = sub.add_parser(
         "brief-rollback",
@@ -1378,6 +1600,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--backup-first", action="store_true", dest="backup_first")
     p.set_defaults(_handler=cmd_db_hard_delete)
+
+    p = db_sub.add_parser(
+        "import-data-map",
+        help="Register data_sources from a markdown table file.",
+    )
+    p.add_argument("--from", dest="from_file", required=True,
+                   help="Path to the markdown file (e.g. claude_database_map.md).")
+    p.add_argument("--default-kind", default="table",
+                   choices=("table", "view", "endpoint", "file", "queue", "other"))
+    p.add_argument("--project", default=None,
+                   help="Canonical slug to stamp on every imported source.")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(_handler=cmd_db_import_data_map)
 
     # audit ---------------------------------------------------------------
     p_audit = sub.add_parser("audit", help="Audit-log operations (HR-7).")
@@ -1546,6 +1781,48 @@ def build_parser() -> argparse.ArgumentParser:
         "budget", help="Print today's daily-token-budget ledger.",
     )
     p.set_defaults(_handler=cmd_sessions_budget)
+
+    # multiuser ------------------------------------------------------------
+    p_mu = sub.add_parser(
+        "multiuser",
+        help="Provision RunawayContext across every Claude user on a shared host.",
+    )
+    mu_sub = p_mu.add_subparsers(dest="multiuser_command", metavar="<mu_cmd>")
+
+    p = mu_sub.add_parser("list", help="List Claude-eligible users.")
+    p.add_argument("--min-uid", type=int, default=1000)
+    p.set_defaults(_handler=cmd_multiuser_list)
+
+    p = mu_sub.add_parser(
+        "provision",
+        help="Run `runaway doctor --fix-all --yes` for every eligible user.",
+    )
+    p.add_argument("--user", action="append", default=None,
+                   help="Restrict to specific username(s); repeat the flag for multiple.")
+    p.add_argument("--min-uid", type=int, default=1000)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--runaway-install-dir", default=None,
+                   help="Pass --install-dir <dir> to each doctor invocation.")
+    p.set_defaults(_handler=cmd_multiuser_provision)
+
+    # memory ---------------------------------------------------------------
+    p_mem = sub.add_parser(
+        "memory",
+        help="Ingest Claude Code auto-memory MDs into the Knowledge Store.",
+    )
+    mem_sub = p_mem.add_subparsers(dest="memory_command", metavar="<mem_cmd>")
+
+    p = mem_sub.add_parser(
+        "ingest",
+        help="Walk ~/.claude/projects/<slug>/memory/ and ingest sibling MDs.",
+    )
+    p.add_argument("--dry-run", action="store_true",
+                   help="Report what would be ingested; touch nothing.")
+    p.add_argument("--project", default=None,
+                   help="Only process memory dirs that map to this canonical slug.")
+    p.add_argument("--claude-root", default=None,
+                   help="Override ~/.claude/projects (for tests/alt installs).")
+    p.set_defaults(_handler=cmd_memory_ingest)
 
     # import-legacy --------------------------------------------------------
     p = sub.add_parser(

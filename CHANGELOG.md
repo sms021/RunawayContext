@@ -7,6 +7,46 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) �
 
 ---
 
+## [3.2.0] — 2026-05-18
+
+Memory-completeness + v2-parity release. v3.1.0 closed the install-completeness gaps; v3.2.0 closes the **memory-completeness** gaps. A real upgrade audit (the 2026-05-17 session that left 31 orphan auto-memory MDs on a single user's machine) plus a thorough v2→v3 review surfaced eight distinct items; all eight are addressed here.
+
+### Added
+
+- **`runaway memory ingest` command** — walks `~/.claude/projects/<slug>/memory/`, parses each non-`MEMORY.md` sibling's frontmatter, inserts into `knowledge_chunks` (or `lessons_learned` for feedback/rule/scar types), and rewrites every MD on disk as a *pointer stub* (`type: pointer` frontmatter with `db_table` + `db_row_id`). Idempotent — a non-pointer MD whose `(project, title)` already matches a row is **linked** rather than re-inserted, and re-runs over an already-rewritten tree are no-ops. Per-file errors are encoded in the report so one bad file never aborts the sweep. New module: `runaway_context.memory_ingest`. (Closes the gap that 2026-05-17 audit found: 31 orphans on one machine, invisible to search.)
+- **`MEMORY_ORPHANS` doctor check** — lists sibling MDs that aren't pointer stubs and WARNs with `runaway memory ingest` as the remediation. Wired into the default `runaway doctor` run.
+- **`SLUG_ORPHANS` doctor check** — implements the `slug-orphan` predictive drift rule that the v3.0.0 CHANGELOG promised but never shipped. Detects rows whose `project` is not in `slug_registry` (or has been deprecated/merged) and reports a sample with remediation hints (register the slug or alias the old name).
+- **`knowledge_chunks.source` + `lessons_learned.source` columns** — provenance for every row. Documented vocabulary: `v2_import`, `import_legacy`, `memory:<path>`, `specialist:<name>`, `mcp_propose`, `manual`. Indexed on both tables. `Client.log_lesson` / `propose_knowledge` accept `source=` and default to `"manual"`. `runaway import-legacy` stamps `import_legacy`. The migrator backfills `v2_import` on pre-existing rows in an idempotent UPDATE (NULL → `'v2_import'`).
+- **Migrator step 11 (memory-orphan scan)** — after schema apply, the migrator counts un-ingested auto-memory MDs and surfaces the count via `MigrationReport.memory_orphans_found` plus a recommended `runaway memory ingest --dry-run` command. HR-4 safe (read-only, never aborts the migration on failure).
+- **Migrator step 12 (data-map discovery)** — looks for `/var/www/html/claude_database_map.md` or `~/claude_database_map.md` and reports a recommended `runaway db import-data-map --from <path> --dry-run` command. Discovery only — does NOT auto-write, because the markdown is free-form and the importer can misclassify edge cases.
+- **`runaway db import-data-map` CLI + `cross_system.import_from_markdown()`** — tolerant markdown-table parser that walks every table in a file and registers `data_sources` rows for any whose headers include `system` + `name` (or recognized synonyms: `source`, `table`, `endpoint`, `kind`, `type`, `description`, `purpose`, `use case`, `notes`). Per-row failures are recorded in `ImportReport.notes` rather than raised. Idempotent via `DataMap.add_source`'s upsert. Closes the audit's "v3 ships tables but migrator never populates them" finding.
+- **`runaway brief-rewrite-pointers` CLI** — regenerates each per-project `MEMORY.md` as a pointer-only index from DB rows (`- LL#N — hook` / `- KC#N — hook`). HR-5 no-clobber: refuses to overwrite any `MEMORY.md` whose first 256 bytes lack the `AUTO-GENERATED` marker.
+- **`runaway multiuser list` + `runaway multiuser provision` CLI** — v3-native replacement for v2's `bin/setup_user_protections.sh`. Enumerates Claude-eligible users on a shared host (UID ≥ `--min-uid`, has `~/.claude`) and shells out to `runaway doctor --fix-all --yes` under each user's identity via `sudo -u`. Refuses root targets (UID 0). Per-user errors are encoded in the JSON report; the sweep never aborts on first failure. New module: `runaway_context.multiuser`.
+- **Default specialist seeding in `runaway init`** — the wizard now seeds six default domain specialists (`general`, `tooling`, `data`, `integrations`, `frontend`, `ops`). Non-interactive installs seed by default; the wizard prompts on interactive; opt out with `defaults={"seed_specialists": False}`. Idempotent via `SpecialistRegistry.register`'s upsert. Closes the audit's "tables exist but init never populates" finding.
+- **Pointer-MD contract codified in `BOOTSTRAP.md`** — explicit section spelling out that `MEMORY.md` and every sibling MD inside a per-project memory dir hold pointers only; detail content lives in `knowledge.db`. Documents the pointer-stub frontmatter shape and the four CLI flows that keep the contract enforced.
+- **61 new tests** across the modules above (`test_e02_source_provenance.py`, `test_memory_ingest.py`, `test_doctor_memory_orphans.py`, `test_doctor_slug_orphans.py`, `test_migrate_step11.py`, `test_cross_system_import.py`, `test_init_seed_specialists.py`, `test_multiuser.py`, `test_brief_rewrite_pointers.py`). Full suite: 685 passing.
+
+### Fixed (cherry-picked from `origin/main`)
+
+- **FTS5 MATCH phrase-quoting** — `retrieval._sanitize_query` now wraps each whitespace-delimited token in double quotes so user queries containing hyphens (e.g. `"client-authoritative multiplayer"`) no longer leak `sqlite3.OperationalError` through to MCP clients. Fixes #1.
+- **macOS symlink hardening in `archive_install`** — the blocked-roots check now seeds both each root and its `resolve()`-d form so `/etc` and `/private/etc` are both caught. Drops blanket `/usr/` and `/var/` blocks (which were swallowing legitimate Homebrew and pytest-tmp paths) in favor of narrower sub-tree blocks. Fixes #2.
+- **Metrics `aggregate()` now buckets by local civil date** — the WHERE clause uses `DATE(occurred_at, 'localtime')` so callers west of UTC see today's events in today's bucket. Storage stays UTC for portability. Fixes #3.
+
+### Changed
+
+- `MigrationReport` gains four new fields: `memory_orphans_found`, `memory_ingest_command`, `data_map_candidate`, `data_map_import_command`. The recommended-follow-up surface is now machine-readable.
+- `doctor.run_diagnostics()` now runs `check_memory_md_orphans` and `check_slug_orphans` alongside the existing checks. Both are read-only and never `fail`.
+- `Client.log_lesson` and `Client.propose_knowledge` gain a `source: str = "manual"` keyword argument. Existing call sites are unaffected; new auto-memory and import-legacy paths supply the appropriate value.
+- `__all__` on `runaway_context.doctor` now exports `check_slug_orphans` and `check_memory_md_orphans`.
+
+### Notes
+
+- **The data-map importer is opt-in.** The migrator discovers candidate files but never writes — the user must run `runaway db import-data-map --from <path>` deliberately because the markdown is free-form and the parser may misclassify edge cases.
+- **The multi-user provisioner requires `sudo`.** On a host without sudo, only the currently-running user is provisionable. Root targets are refused unless explicitly named via `--user root`, and even then the underlying `pwd` filter still applies.
+- **Pointer stubs are reversible.** Re-ingesting a pointer stub is a no-op (the importer detects `type: pointer` in the frontmatter). If a sibling MD reverts to non-pointer form (e.g. Claude Code's auto-memory rewrites it), the next ingest sweep will re-link or re-insert it.
+
+---
+
 ## [3.1.0] — 2026-05-15
 
 Install-completeness release. v3.0.0 shipped the contract surface; v3.1.0 ships the **install ergonomics** that v3.0.0 expected the adopter's AI to wire by hand. A real install audit (the 2026-05-13 home-machine session) surfaced five distinct gaps; this release closes all of them and adds three more guards no one had asked for yet but which would have prevented one of the failure modes that actually happened.

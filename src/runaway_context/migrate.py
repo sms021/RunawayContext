@@ -226,6 +226,10 @@ class MigrationReport:
     row_counts_after: Dict[str, int] = field(default_factory=dict)
     backup_path: Optional[Path] = None
     aborted_reason: Optional[str] = None
+    memory_orphans_found: Optional[int] = None
+    memory_ingest_command: Optional[str] = None
+    data_map_candidate: Optional[Path] = None
+    data_map_import_command: Optional[str] = None
 
     @property
     def succeeded(self) -> bool:
@@ -425,6 +429,17 @@ def migrate(
                 )
             report.steps_applied.append(fname)
 
+        # Backfill provenance for rows that existed BEFORE the v3.2.0 source
+        # column was added. Idempotent: only touches rows where source IS NULL,
+        # so re-running migrate after the column ships does nothing.
+        for t in ("knowledge_chunks", "lessons_learned"):
+            after = _table_info(conn, t)
+            if "source" in after:
+                conn.execute(
+                    f"UPDATE {t} SET source = 'v2_import' WHERE source IS NULL"
+                )
+        conn.commit()
+
         # post-step verification: no column lost (HR-4)
         for t, before in cols_before.items():
             after = _table_info(conn, t)
@@ -481,7 +496,83 @@ def migrate(
         finally:
             mconn.close()
 
+    # Step 11: scan for un-ingested auto-memory MDs and report the count.
+    # The migrator does NOT auto-ingest because the importer needs an active
+    # Client + slug_registry coverage that may not be wired yet; instead we
+    # surface the count so the post-migrate UI / doctor can prompt the user.
+    # HR-4 safe: dry-run only, no DB or filesystem writes.
+    try:
+        orphans = _count_memory_orphans()
+    except Exception:
+        # Any failure in the optional discovery step must NOT abort migrate;
+        # the doctor's check_memory_md_orphans will surface it later.
+        orphans = None
+    if orphans is not None:
+        report.memory_orphans_found = orphans
+        if orphans > 0:
+            report.memory_ingest_command = "runaway memory ingest --dry-run"
+            report.steps_applied.append(f"step11:memory_orphans={orphans}")
+
+    # Step 12: discover (do NOT auto-import) a cross-system data map. The
+    # markdown is free-form and the importer can misclassify — keep it
+    # explicit so the user can review the report before writing rows.
+    dmap = _discover_data_map_file()
+    if dmap is not None:
+        report.data_map_candidate = dmap
+        report.data_map_import_command = (
+            f"runaway db import-data-map --from {dmap} --dry-run"
+        )
+        report.steps_applied.append(f"step12:data_map_candidate={dmap}")
+
     return report
+
+
+def _discover_data_map_file() -> Optional[Path]:
+    """Look for a likely cross-system markdown map in standard locations.
+
+    The Parkway install canonically lives at
+    ``/var/www/html/claude_database_map.md`` but the file may also sit beside
+    the install dir. We return the first match or ``None``.
+    """
+    candidates = [
+        Path("/var/www/html/claude_database_map.md"),
+        Path.home() / "claude_database_map.md",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _count_memory_orphans() -> int:
+    """Cheap, read-only count of auto-memory MDs not yet rewritten as pointers.
+
+    Called from :func:`migrate` step 11. Mirrors
+    :func:`runaway_context.doctor.check_memory_md_orphans` but avoids the
+    Doctor import cycle (migrate imports doctor would be fine, but doctor
+    imports Config which loads from the install_dir we're mid-migrating).
+
+    Refuses:
+        Nothing — returns 0 when ``~/.claude/projects`` is missing.
+    """
+    proj_root = Path.home() / ".claude" / "projects"
+    if not proj_root.exists():
+        return 0
+    count = 0
+    for memdir in proj_root.rglob("memory"):
+        if not memdir.is_dir():
+            continue
+        for p in memdir.glob("*.md"):
+            if p.name == "MEMORY.md":
+                continue
+            try:
+                head = p.read_text(encoding="utf-8", errors="replace")[:512]
+            except OSError:
+                continue
+            if "type: pointer" in head:
+                continue
+            count += 1
+    return count
 
 
 def schema_version(knowledge_db: Path) -> Optional[tuple]:

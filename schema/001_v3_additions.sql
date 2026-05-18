@@ -28,6 +28,16 @@ ALTER TABLE knowledge_chunks ADD COLUMN deletion_reason TEXT;
 ALTER TABLE knowledge_chunks ADD COLUMN version INTEGER DEFAULT 1;
 ALTER TABLE knowledge_chunks ADD COLUMN previous_version_id INTEGER;
 CREATE INDEX IF NOT EXISTS idx_chunks_deleted ON knowledge_chunks(deleted_at);
+-- Provenance (v3.2.0). Records where each row originated. Additive vocabulary;
+-- readers must accept unknown values. Documented values:
+--   'v2_import'      rows present at v2->v3 migration time (id <= pre-mig max)
+--   'import_legacy'  inserted by `runaway import-legacy --from <dir>`
+--   'memory:<path>'  inserted by `runaway memory ingest` from a per-project MD
+--   'specialist:<n>' inserted by specialist agent registration
+--   'mcp_propose'    inserted through MCP propose_lesson_draft -> approve flow
+--   'manual'         direct Client API / CLI insertion post-migration
+ALTER TABLE knowledge_chunks ADD COLUMN source TEXT;
+CREATE INDEX IF NOT EXISTS idx_chunks_source ON knowledge_chunks(source);
 
 -- lessons_learned
 ALTER TABLE lessons_learned ADD COLUMN deleted_at DATETIME;
@@ -36,6 +46,8 @@ ALTER TABLE lessons_learned ADD COLUMN deletion_reason TEXT;
 ALTER TABLE lessons_learned ADD COLUMN version INTEGER DEFAULT 1;
 ALTER TABLE lessons_learned ADD COLUMN previous_version_id INTEGER;
 CREATE INDEX IF NOT EXISTS idx_ll_deleted ON lessons_learned(deleted_at);
+ALTER TABLE lessons_learned ADD COLUMN source TEXT;
+CREATE INDEX IF NOT EXISTS idx_ll_source ON lessons_learned(source);
 
 -- Versioned-content archive (HR-3: every write is recoverable)
 CREATE TABLE IF NOT EXISTS record_versions (

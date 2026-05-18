@@ -271,6 +271,76 @@ def _list_template_dirs(root: Path) -> List[Path]:
     return sorted([p for p in root.iterdir() if p.is_dir()])
 
 
+# Default specialists seeded by the install wizard. Each is a domain anchor
+# the adopter's AI can route domain-specific knowledge through. Adopters can
+# delete or override them — these are starting points, not contracts.
+DEFAULT_SPECIALISTS: List[Dict[str, str]] = [
+    {
+        "name": "general",
+        "domain": "general",
+        "description": "Catch-all specialist for knowledge that doesn't fit a "
+                       "more specific domain.",
+    },
+    {
+        "name": "tooling",
+        "domain": "tooling",
+        "description": "Build, test, install, and CI/CD related knowledge.",
+    },
+    {
+        "name": "data",
+        "domain": "data",
+        "description": "Database schemas, queries, ETL, and warehouse knowledge.",
+    },
+    {
+        "name": "integrations",
+        "domain": "integrations",
+        "description": "API clients, webhooks, third-party service integrations.",
+    },
+    {
+        "name": "frontend",
+        "domain": "frontend",
+        "description": "UI, layout, design-system, and accessibility knowledge.",
+    },
+    {
+        "name": "ops",
+        "domain": "ops",
+        "description": "Deployments, monitoring, incidents, and on-call rotations.",
+    },
+]
+
+
+def _seed_specialists(install_dir: Path) -> List[str]:
+    """Insert each entry in :data:`DEFAULT_SPECIALISTS` into ``specialists``.
+
+    Idempotent: :func:`Specialists.register` is an upsert by name. Existing
+    rows have their domain/description refreshed but ``md_path`` is preserved.
+
+    Returns:
+        Names of specialists that were seeded (or refreshed).
+
+    Refuses:
+        Nothing — per-row failures are printed but don't abort the wizard.
+    """
+    from runaway_context.specialists import SpecialistRegistry
+
+    knowledge_db = install_dir / "knowledge.db"
+    if not knowledge_db.exists():
+        return []
+    sp = SpecialistRegistry(knowledge_db)
+    seeded: List[str] = []
+    for entry in DEFAULT_SPECIALISTS:
+        try:
+            sp.register(
+                name=entry["name"],
+                domain=entry["domain"],
+                description=entry["description"],
+            )
+            seeded.append(entry["name"])
+        except Exception as exc:  # noqa: BLE001 — surface to caller per HR-10
+            print(f"  failed to seed specialist '{entry['name']}': {exc}")
+    return seeded
+
+
 def _register_slugs(install_dir: Path, slugs: Iterable[str]) -> List[str]:
     """Register the given slugs in the local ``project_slugs`` table.
 
@@ -361,6 +431,9 @@ def run(install_dir: Optional[Path] = None,
             metrics_db=target_dir / "metrics.db",
         )
         get_or_create_install_id(target_dir)
+        # Seed default specialists unless explicitly opted out via defaults.
+        if defaults.get("seed_specialists", True):
+            _seed_specialists(target_dir)
         cfg = _write_config(
             target_dir,
             tier=tier,
@@ -481,6 +554,14 @@ def run(install_dir: Optional[Path] = None,
     if slugs:
         inserted = _register_slugs(target_dir, slugs)
         print(f"  registered: {', '.join(inserted) if inserted else '(none)'}")
+
+    # 9b. seed default specialists (v3.2.0). Opt-out via -n; opt-in on
+    # interactive runs with the wizard prompt below.
+    if _ask_yes_no("Seed default domain specialists "
+                   "(general/tooling/data/integrations/frontend/ops)?",
+                   default=True):
+        seeded = _seed_specialists(target_dir)
+        print(f"  seeded specialists: {', '.join(seeded) if seeded else '(none)'}")
 
     # 10. config + next steps
     cfg = _write_config(

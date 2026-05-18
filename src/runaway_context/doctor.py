@@ -324,6 +324,71 @@ def check_slug_registry(cfg: Config) -> Finding:
     return _ok("SLUG_REGISTRY", f"{count} active slug(s) registered")
 
 
+def check_slug_orphans(cfg: Config) -> Finding:
+    """Detect rows whose ``project`` (or any ``project_tags`` slug) is not in
+    ``slug_registry`` — the "slug-orphan" predictive drift rule promised in
+    v3.0.0 but never wired.
+
+    Why it matters: HR-2 mandates every write reference a canonical slug.
+    But ``slug_registry`` evolution (``deprecate_slug`` / ``merge_slugs``) can
+    leave older rows pointing at slugs that have been demoted to ``alias`` /
+    ``merged``. Without detection those rows accumulate silently and get
+    rerouted at every read.
+
+    Returns:
+        OK when zero orphans across both tables; WARN with up-to-20 sample
+        rows otherwise. Counts and sample include both ``knowledge_chunks``
+        and ``lessons_learned``.
+    """
+    conn = sqlite3.connect(str(cfg.knowledge_db))
+    try:
+        active = {
+            r[0]
+            for r in conn.execute(
+                "SELECT slug FROM slug_registry WHERE status = 'active'"
+            )
+        }
+        # NULL slug_registry => no rows to compare; treat as OK (a freshly
+        # migrated DB with zero registrations is caught by check_slug_registry).
+        if not active:
+            return _ok("SLUG_ORPHANS", "no active slugs registered yet")
+        orphan_samples: List[Dict[str, Any]] = []
+        total = 0
+        for table in ("knowledge_chunks", "lessons_learned"):
+            rows = conn.execute(
+                f"SELECT id, project FROM {table} "
+                f"WHERE deleted_at IS NULL AND project IS NOT NULL"
+            ).fetchall()
+            for rid, proj in rows:
+                if proj not in active:
+                    total += 1
+                    if len(orphan_samples) < 20:
+                        orphan_samples.append(
+                            {"table": table, "id": rid, "project": proj}
+                        )
+    except sqlite3.OperationalError as exc:
+        conn.close()
+        return _fail(
+            "SLUG_ORPHANS", f"unable to scan tables: {exc}",
+            remediation="Re-run `runaway db migrate`.",
+        )
+    finally:
+        conn.close()
+
+    if total == 0:
+        return _ok("SLUG_ORPHANS", "no rows reference non-active slugs")
+    return _warn(
+        "SLUG_ORPHANS",
+        f"{total} row(s) reference a slug that is not active in slug_registry",
+        remediation=(
+            "Either register the missing slug (`runaway slug register <slug>`) or "
+            "use `runaway slug alias <old> <canonical>` to redirect the rows. "
+            "List the active set with `runaway slug list`."
+        ),
+        samples=orphan_samples, total_orphans=total,
+    )
+
+
 def check_drift_hook(cfg: Config) -> Finding:
     """Confirm a drift detection hook is wired (Stop hook or cron).
 
@@ -493,6 +558,60 @@ def check_memory_md_stale_paths(install_dir: Optional[Path] = None) -> Finding:
     )
 
 
+def check_memory_md_orphans(
+    install_dir: Optional[Path] = None,
+    *,
+    claude_projects_root: Optional[Path] = None,
+) -> Finding:
+    """Count auto-memory MDs that are not pointer stubs (un-ingested).
+
+    Sibling files of ``MEMORY.md`` (``feedback_*.md`` / ``project_*.md`` /
+    ``reference_*.md`` / ``user_*.md``) belong in the Knowledge Store. Until
+    they're ingested they're invisible to ``search_chunks`` / ``search_lessons``
+    and MCP. The remediation is ``runaway memory ingest``.
+
+    Args:
+        install_dir: unused; kept for parity with sibling checks.
+        claude_projects_root: override ``~/.claude/projects`` (used in tests).
+
+    Returns:
+        OK when no orphans; WARN with the count and a sample of paths.
+    """
+    proj_root = Path(claude_projects_root) if claude_projects_root else (
+        Path.home() / ".claude" / "projects"
+    )
+    if not proj_root.exists():
+        return _ok("MEMORY_ORPHANS", "no ~/.claude/projects tree")
+    orphans: List[str] = []
+    for memdir in proj_root.rglob("memory"):
+        if not memdir.is_dir():
+            continue
+        for p in memdir.glob("*.md"):
+            if p.name == "MEMORY.md":
+                continue
+            try:
+                head = p.read_text(encoding="utf-8", errors="replace")[:512]
+            except OSError:
+                continue
+            # Pointer stubs declare `type: pointer` in their frontmatter.
+            if "type: pointer" in head:
+                continue
+            orphans.append(str(p))
+    if not orphans:
+        return _ok("MEMORY_ORPHANS", "no un-ingested auto-memory MDs")
+    return _warn(
+        "MEMORY_ORPHANS",
+        f"{len(orphans)} auto-memory MD(s) not yet ingested into the KS",
+        remediation=(
+            "Run `runaway memory ingest --dry-run` to preview, then "
+            "`runaway memory ingest` to import + rewrite each MD as a pointer. "
+            "The importer is idempotent and per-file errors do not abort the sweep."
+        ),
+        files=orphans[:20],
+        total_orphans=len(orphans),
+    )
+
+
 def check_mcp_wiring() -> Finding:
     """Verify ``~/.claude/mcp.json`` lists the runaway-context server.
 
@@ -593,6 +712,7 @@ def run_diagnostics(install_dir: Optional[Path] = None) -> List[Finding]:
         check_install_dir(cfg),
         check_constitution_stale_paths(),
         check_memory_md_stale_paths(install_dir),
+        check_memory_md_orphans(install_dir),
         check_mcp_wiring(),
         check_capture_hook(cfg),
     ]
@@ -602,6 +722,7 @@ def run_diagnostics(install_dir: Optional[Path] = None) -> List[Finding]:
             check_schema_version(cfg),
             check_audit_chain(cfg),
             check_slug_registry(cfg),
+            check_slug_orphans(cfg),
             check_drift_hook(cfg),
             check_tier_gate(cfg),
         ])
@@ -697,7 +818,9 @@ __all__ = [
     "check_schema_version",
     "check_audit_chain",
     "check_slug_registry",
+    "check_slug_orphans",
     "check_drift_hook",
+    "check_memory_md_orphans",
     "check_tier_gate",
     "check_runaway_cli",
     "check_optional_module",

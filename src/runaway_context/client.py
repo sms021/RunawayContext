@@ -825,6 +825,7 @@ class Client:
         frequency: Optional[int] = None,
         reversibility: Optional[int] = None,
         source_conversation_ref: Optional[str] = None,
+        source: str = "manual",
     ) -> int:
         """Insert a new lesson learned. Validates every slug in *project_tags* (HR-2).
 
@@ -875,12 +876,12 @@ class Client:
                     "INSERT INTO lessons_learned "
                     "(project, title, what_happened, why, the_fix, prevention_rule, "
                     " severity, status, project_tags, source_conversation_ref, "
-                    " blast_radius, frequency, reversibility, author_id, maturity) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, 'scar')",
+                    " blast_radius, frequency, reversibility, author_id, maturity, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, 'scar', ?)",
                     (
                         project, title, what_happened, why, the_fix, prevention_rule,
                         severity, tags_json, source_conversation_ref,
-                        blast_radius, frequency, reversibility, actor,
+                        blast_radius, frequency, reversibility, actor, source,
                     ),
                 )
                 lesson_id = int(cur.lastrowid)
@@ -903,6 +904,7 @@ class Client:
         body: str,
         tags: Optional[List[str]] = None,
         project_tags: Optional[List[str]] = None,
+        source: str = "manual",
     ) -> int:
         """Insert a new knowledge_chunk. Validates *project_tags* (HR-2).
 
@@ -947,9 +949,9 @@ class Client:
             with transaction(conn):
                 cur = conn.execute(
                     "INSERT INTO knowledge_chunks "
-                    "(project, project_tags, topic, title, body, tags, author_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (project, project_tags_json, topic, title, body, tags_json, actor),
+                    "(project, project_tags, topic, title, body, tags, author_id, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (project, project_tags_json, topic, title, body, tags_json, actor, source),
                 )
                 chunk_id = int(cur.lastrowid)
                 self._audit_append(
