@@ -538,7 +538,10 @@ def aggregate(bucket_date: str) -> int:
             "SELECT kind, name, COUNT(*) AS c, "
             "       SUM(COALESCE(value_num, 0)) AS s "
             "FROM metric_events "
-            "WHERE DATE(occurred_at) = ? "
+            # occurred_at is stored in UTC (CURRENT_TIMESTAMP); compare in the
+            # caller's local timezone so daily buckets align with what users
+            # mean by "today" — date.today() returns the local civil date.
+            "WHERE DATE(occurred_at, 'localtime') = ? "
             "GROUP BY kind, name",
             (bucket_date,),
         ).fetchall()
