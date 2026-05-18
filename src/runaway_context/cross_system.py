@@ -18,7 +18,9 @@ Refuses:
 
 from __future__ import annotations
 
+import re
 import sqlite3
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -405,3 +407,167 @@ class DataMap:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(content)
         return len(lines)
+
+
+# ---------------------------------------------------------------------------
+# Markdown importer (v3.2.0)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ImportReport:
+    """Result of a markdown-table import pass."""
+
+    sources_added: int = 0
+    sources_skipped: int = 0
+    mappings_added: int = 0
+    mappings_skipped: int = 0
+    notes: List[str] = field(default_factory=list)
+
+
+_TABLE_HEADER_RE = re.compile(r"^\s*\|(.+)\|\s*$")
+_TABLE_DIVIDER_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
+
+
+def _split_pipes(line: str) -> List[str]:
+    """Split a markdown table row on pipes, trimming each cell."""
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _scan_markdown_tables(text: str) -> List[Tuple[List[str], List[List[str]]]]:
+    """Find every markdown table in *text*.
+
+    Returns:
+        List of ``(headers, rows)`` tuples. Each headers/row list is a list
+        of trimmed cell strings.
+    """
+    out: List[Tuple[List[str], List[List[str]]]] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _TABLE_HEADER_RE.match(line) and i + 1 < len(lines) \
+                and _TABLE_DIVIDER_RE.match(lines[i + 1]):
+            headers = _split_pipes(line)
+            rows: List[List[str]] = []
+            j = i + 2
+            while j < len(lines) and _TABLE_HEADER_RE.match(lines[j]) \
+                    and not _TABLE_DIVIDER_RE.match(lines[j]):
+                rows.append(_split_pipes(lines[j]))
+                j += 1
+            out.append((headers, rows))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+# Header patterns we recognise as describing data sources.
+_SYSTEM_HEADERS = {"system", "source", "src"}
+_NAME_HEADERS = {"name", "table", "endpoint", "id", "primary key", "key"}
+_KIND_HEADERS = {"kind", "type"}
+_DESCRIPTION_HEADERS = {"description", "purpose", "use case", "notes"}
+
+
+def _classify_header(h: str) -> Optional[str]:
+    low = h.lower().strip()
+    if low in _SYSTEM_HEADERS:
+        return "system"
+    if low in _NAME_HEADERS:
+        return "name"
+    if low in _KIND_HEADERS:
+        return "kind"
+    if low in _DESCRIPTION_HEADERS:
+        return "description"
+    return None
+
+
+def import_from_markdown(
+    knowledge_db: Path,
+    md_path: Path,
+    *,
+    default_kind: str = "table",
+    project: Optional[str] = None,
+    dry_run: bool = False,
+) -> ImportReport:
+    """Parse *md_path* and register the sources it describes in *knowledge_db*.
+
+    The importer is tolerant: it walks every markdown table in the file and
+    only acts on tables whose headers include at least ``system`` and ``name``
+    (or recognised synonyms). Free-form prose tables (e.g. "## Quick System
+    Reference") get caught when their headers contain ``System`` and a name
+    column. The importer never raises on per-row issues — they're recorded
+    in :class:`ImportReport.notes`.
+
+    This is the migrator's step 7.5 entry point but is also exposed via
+    ``runaway db import-data-map``.
+
+    Args:
+        knowledge_db: target DB; must already have v3 schema applied.
+        md_path: source markdown file (typically
+            ``/var/www/html/claude_database_map.md``).
+        default_kind: kind to assign when the table has no kind column.
+            One of the values allowed by :data:`_ALLOWED_KINDS`.
+        project: optional canonical slug to stamp on every imported source.
+        dry_run: when True, parse and report but do not write.
+
+    Returns:
+        :class:`ImportReport` with insert/skip counts plus a free-text
+        ``notes`` list naming each skipped row.
+    """
+    report = ImportReport()
+    if default_kind not in _ALLOWED_KINDS:
+        raise ValueError(
+            f"default_kind {default_kind!r} not in {_ALLOWED_KINDS!r}"
+        )
+    if not md_path.exists():
+        report.notes.append(f"no such file: {md_path}")
+        return report
+    text = md_path.read_text(encoding="utf-8", errors="replace")
+    tables = _scan_markdown_tables(text)
+    if not tables:
+        report.notes.append("no markdown tables found")
+        return report
+
+    dm: Optional[DataMap] = None if dry_run else DataMap(knowledge_db)
+
+    for headers, rows in tables:
+        col_kind = [_classify_header(h) for h in headers]
+        if "system" not in col_kind or "name" not in col_kind:
+            continue
+        sys_i = col_kind.index("system")
+        name_i = col_kind.index("name")
+        kind_i = col_kind.index("kind") if "kind" in col_kind else None
+        desc_i = col_kind.index("description") if "description" in col_kind \
+            else None
+
+        for row in rows:
+            if len(row) <= max(sys_i, name_i):
+                report.sources_skipped += 1
+                report.notes.append(f"short row: {row!r}")
+                continue
+            system = re.sub(r"[*_`]", "", row[sys_i]).strip().lower()
+            name = re.sub(r"[*_`]", "", row[name_i]).strip()
+            if not system or not name or system.startswith("---"):
+                report.sources_skipped += 1
+                continue
+            kind = (row[kind_i].strip().lower() if kind_i is not None
+                    and len(row) > kind_i else default_kind)
+            if kind not in _ALLOWED_KINDS:
+                kind = default_kind
+            description = (row[desc_i] if desc_i is not None
+                           and len(row) > desc_i else None)
+            if dry_run:
+                report.sources_added += 1
+                continue
+            try:
+                assert dm is not None
+                dm.add_source(
+                    system=system, name=name, kind=kind,
+                    description=description, project=project,
+                )
+                report.sources_added += 1
+            except (ValueError, sqlite3.IntegrityError) as exc:
+                report.sources_skipped += 1
+                report.notes.append(f"{system}:{name} -> {exc}")
+    return report

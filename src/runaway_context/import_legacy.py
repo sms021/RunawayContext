@@ -194,9 +194,9 @@ def _import_chunks(
                 dst.execute(
                     "INSERT INTO knowledge_chunks "
                     "(project, project_tags, topic, title, body, tags, "
-                    "created_at, updated_at) "
+                    "created_at, updated_at, source) "
                     "VALUES (:project, :project_tags, :topic, :title, :body, "
-                    ":tags, :created_at, :updated_at)",
+                    ":tags, :created_at, :updated_at, 'import_legacy')",
                     {
                         "project": r["project"],
                         "project_tags": project_tags,
@@ -269,8 +269,8 @@ def _import_lessons(
                     "INSERT INTO lessons_learned "
                     "(project, project_tags, title, prevention_rule, "
                     "what_happened, why, the_fix, severity, "
-                    "created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "created_at, updated_at, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'import_legacy')",
                     (
                         canonical, project_tags,
                         r.get("title") or "(untitled)",
