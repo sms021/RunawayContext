@@ -98,6 +98,48 @@ def detect_v1_layout(knowledge_db: Path) -> bool:
         conn.close()
 
 
+def detect_partial_shape(knowledge_db: Path) -> Optional[Dict[str, Any]]:
+    """Return a description of partial-canonical shape when some v2 tables are
+    present and others are missing entirely.
+
+    Distinct from :func:`detect_foreign_v1_shape` (which checks for v1-named
+    tables that exist but are missing canonical columns). This probe catches
+    the "homemade KS" case: a SQLite DB that has, e.g., ``lessons_learned``
+    with all the right columns but **no ``knowledge_chunks`` table at all**.
+    The migrator currently CREATE-TABLE-IF-NOT-EXISTS's the missing table
+    silently, which is technically correct but can mask the fact that the
+    user's existing "chunks-like" data lives elsewhere under a different name
+    and would be invisible after migration.
+
+    Returns:
+        ``None`` when the DB has all of (knowledge_chunks, lessons_learned)
+        OR none of them. A dict ``{"present": [...], "missing": [...]}`` when
+        exactly one of the two is present.
+
+    Refuses:
+        Nothing — read-only probe, never raises on missing files.
+    """
+    p = Path(knowledge_db)
+    if not p.exists():
+        return None
+    conn = sqlite3.connect(str(p))
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        canonical = {"knowledge_chunks", "lessons_learned"}
+        present = sorted(canonical & tables)
+        missing = sorted(canonical - tables)
+        if not present or not missing:
+            return None
+        return {"present": present, "missing": missing}
+    finally:
+        conn.close()
+
+
 def detect_foreign_v1_shape(knowledge_db: Path) -> Optional[Dict[str, List[str]]]:
     """Return a mapping of v1-named tables that are missing canonical columns.
 

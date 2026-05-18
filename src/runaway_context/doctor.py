@@ -693,6 +693,222 @@ def check_capture_hook(cfg: Config) -> Finding:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Install-location discovery (v3.3.0)
+# ---------------------------------------------------------------------------
+
+
+def _classify_db(path: Path) -> Dict[str, Any]:
+    """Inspect a knowledge.db file and return a one-line classification.
+
+    Returns:
+        Dict with keys:
+          - path: str
+          - shape: 'v3' | 'v2' | 'v1' | 'foreign_v1' | 'partial' | 'empty' | 'unreadable'
+          - row_counts: {table: count} for the canonical tables that exist
+          - notes: short free-text detail
+    """
+    out: Dict[str, Any] = {
+        "path": str(path), "shape": "unreadable",
+        "row_counts": {}, "notes": "",
+    }
+    try:
+        conn = sqlite3.connect(str(path))
+    except sqlite3.Error as exc:
+        out["notes"] = f"open failed: {exc}"
+        return out
+    try:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        if not tables:
+            out["shape"] = "empty"
+            return out
+        for t in ("knowledge_chunks", "lessons_learned", "sessions",
+                  "schema_version"):
+            if t in tables:
+                try:
+                    out["row_counts"][t] = conn.execute(
+                        f"SELECT COUNT(*) FROM {t}"
+                    ).fetchone()[0]
+                except sqlite3.OperationalError:
+                    out["row_counts"][t] = -1
+        if "schema_version" in tables:
+            try:
+                row = conn.execute(
+                    "SELECT major, minor, patch FROM schema_version WHERE id=1"
+                ).fetchone()
+                if row:
+                    out["notes"] = f"schema_version={row[0]}.{row[1]}.{row[2]}"
+                    out["shape"] = "v3" if row[0] >= 3 else f"v{row[0]}"
+                    return out
+            except sqlite3.OperationalError:
+                pass
+        # No schema_version row — v1 / v2 / foreign discriminator
+        from runaway_context.migrate import (
+            detect_v1_layout, detect_foreign_v1_shape,
+        )
+        if detect_v1_layout(path):
+            out["shape"] = "v1"
+            return out
+        foreign = detect_foreign_v1_shape(path)
+        if foreign:
+            out["shape"] = "foreign_v1"
+            out["notes"] = "; ".join(
+                f"{t} missing {','.join(cols)}" for t, cols in foreign.items()
+            )
+            return out
+        # No schema_version, not v1, not foreign: classify by which of the
+        # canonical knowledge tables are present.
+        # - v2 (canonical): knowledge_chunks + lessons_learned, no sessions
+        #   (sessions live in a separate sessions.db on v2 installs).
+        # - partial: one of (chunks, lessons) present, the other missing.
+        #   (Real-world case: homemade KS that built only one of the two.)
+        has_chunks = "knowledge_chunks" in tables
+        has_lessons = "lessons_learned" in tables
+        if has_chunks and has_lessons:
+            out["shape"] = "v2"
+            return out
+        if has_chunks or has_lessons:
+            present = sorted(t for t in ("knowledge_chunks", "lessons_learned")
+                             if t in tables)
+            missing = sorted({"knowledge_chunks", "lessons_learned"} - set(present))
+            out["shape"] = "partial"
+            out["notes"] = f"has {present}, missing {missing}"
+            return out
+        out["shape"] = "empty"
+        return out
+    finally:
+        conn.close()
+
+
+# Roots scanned by default. Each root is scanned non-recursively for direct
+# children, then a bounded rglob is used (depth-limited to avoid runaway
+# walks on big trees).
+_DEFAULT_SCAN_ROOTS = (
+    Path.home(),
+    Path.home() / "_knowledge",
+    Path("/var/www/html"),
+    Path("/srv"),
+    Path("/opt"),
+)
+
+
+def scan_install_candidates(
+    roots: Optional[List[Path]] = None,
+    *,
+    max_depth: int = 4,
+) -> List[Dict[str, Any]]:
+    """Walk *roots* looking for ``knowledge.db`` files and classify each.
+
+    Args:
+        roots: directories to scan. Defaults to :data:`_DEFAULT_SCAN_ROOTS`.
+        max_depth: walk depth limit per root (prevents pathological deep-tree
+            traversal). 4 is enough to catch typical layouts
+            (``<root>/<proj>/_KnowledgeStore/knowledge.db``).
+
+    Returns:
+        List of classification dicts (see :func:`_classify_db`), deduplicated
+        by absolute path.
+
+    Refuses:
+        Nothing — read-only walk. Permission errors per directory are
+        silently skipped.
+    """
+    use_roots = roots if roots is not None else list(_DEFAULT_SCAN_ROOTS)
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for root in use_roots:
+        try:
+            if not root.exists() or not root.is_dir():
+                continue
+        except OSError:
+            continue
+        # Bounded walk: track depth and prune on permission errors.
+        stack: List[tuple] = [(root, 0)]
+        while stack:
+            d, depth = stack.pop()
+            if depth > max_depth:
+                continue
+            try:
+                entries = list(d.iterdir())
+            except (PermissionError, OSError):
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_file() and entry.name == "knowledge.db":
+                        ap = entry.resolve()
+                        if ap in seen:
+                            continue
+                        seen.add(ap)
+                        out.append(_classify_db(entry))
+                    elif entry.is_dir() and not entry.name.startswith("."):
+                        stack.append((entry, depth + 1))
+                except (PermissionError, OSError):
+                    continue
+    return out
+
+
+def check_partial_shape(cfg: Config) -> Finding:
+    """WARN when knowledge.db has one of (chunks, lessons) but not the other.
+
+    Returns:
+        OK when shape is canonical; WARN when partial. Always non-destructive.
+    """
+    from runaway_context.migrate import detect_partial_shape
+
+    if not cfg.knowledge_db or not Path(cfg.knowledge_db).exists():
+        return _ok("PARTIAL_SHAPE", "no knowledge.db to inspect")
+    partial = detect_partial_shape(Path(cfg.knowledge_db))
+    if partial is None:
+        return _ok("PARTIAL_SHAPE", "knowledge.db has canonical table layout")
+    return _warn(
+        "PARTIAL_SHAPE",
+        f"knowledge.db has {partial['present']} but is missing "
+        f"{partial['missing']} — the migrator would silently CREATE the "
+        f"missing table(s), which can mask homemade data under different names",
+        remediation=(
+            "If your existing content lives under a different table name "
+            "(e.g. 'rules' instead of 'lessons_learned'), use "
+            "`runaway import-legacy --from <dir>` to copy rows in with explicit "
+            "column mapping rather than letting `runaway db migrate` create "
+            "empty new tables alongside your real data."
+        ),
+        present=partial["present"], missing=partial["missing"],
+    )
+
+
+def check_install_location_ambiguous(cfg: Config) -> Finding:
+    """WARN when more than one knowledge.db candidate exists on the host.
+
+    Returns:
+        OK when zero or one candidate is found; WARN when >1 (the user might
+        be operating on the wrong DB).
+    """
+    candidates = scan_install_candidates()
+    if len(candidates) <= 1:
+        return _ok(
+            "INSTALL_LOCATION", f"{len(candidates)} knowledge.db candidate(s) found",
+            candidates=candidates,
+        )
+    current = str(Path(cfg.knowledge_db).resolve()) if cfg.knowledge_db else None
+    others = [c for c in candidates if c["path"] != current]
+    return _warn(
+        "INSTALL_LOCATION_AMBIGUOUS",
+        f"{len(candidates)} knowledge.db candidates found on this host — "
+        f"verify you're operating on the right one",
+        remediation=(
+            "Inspect each candidate with `runaway doctor --install-dir <dir> --json`. "
+            "Use `--install-dir` (or set RC_KS_DIR) to point at the install you mean. "
+            "If you have a non-canonical v2 install, run "
+            "`runaway db migrate --knowledge-db <path>` against THAT path."
+        ),
+        candidates=candidates, current=current, other_candidates=others,
+    )
+
+
 def run_diagnostics(install_dir: Optional[Path] = None) -> List[Finding]:
     """Run every diagnostic and return the collected findings.
 
@@ -713,6 +929,7 @@ def run_diagnostics(install_dir: Optional[Path] = None) -> List[Finding]:
         check_constitution_stale_paths(),
         check_memory_md_stale_paths(install_dir),
         check_memory_md_orphans(install_dir),
+        check_install_location_ambiguous(cfg),
         check_mcp_wiring(),
         check_capture_hook(cfg),
     ]
@@ -723,6 +940,7 @@ def run_diagnostics(install_dir: Optional[Path] = None) -> List[Finding]:
             check_audit_chain(cfg),
             check_slug_registry(cfg),
             check_slug_orphans(cfg),
+            check_partial_shape(cfg),
             check_drift_hook(cfg),
             check_tier_gate(cfg),
         ])
@@ -821,6 +1039,9 @@ __all__ = [
     "check_slug_orphans",
     "check_drift_hook",
     "check_memory_md_orphans",
+    "check_install_location_ambiguous",
+    "check_partial_shape",
+    "scan_install_candidates",
     "check_tier_gate",
     "check_runaway_cli",
     "check_optional_module",

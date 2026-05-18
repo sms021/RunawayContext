@@ -77,12 +77,19 @@ def test_hr_03_soft_delete_only_marks_row(seeded_client) -> None:
 
 def test_hr_03_cli_hard_delete_requires_both_flags(tmp_install) -> None:
     """HR-3: ``runaway db hard-delete`` exits 2 without both safety flags."""
+    # PYTHONPATH=src so the subprocess can import runaway_context even when
+    # the package hasn't been pip-installed into the system python (see #13
+    # — INSTALL_PROMPT step 5 runs pytest BEFORE verifying step 4 took).
+    import os
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    env = {**os.environ, "PYTHONPATH": str(repo_root / "src")}
     # No flags
     proc = subprocess.run(
         [sys.executable, "-m", "runaway_context.cli",
          "--install-dir", str(tmp_install),
          "db", "hard-delete", "--table", "lessons_learned", "--id", "1"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=env,
     )
     assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
 

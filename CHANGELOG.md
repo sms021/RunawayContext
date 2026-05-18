@@ -7,6 +7,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html) �
 
 ---
 
+## [3.3.3] — 2026-05-18
+
+**The adoption release.** v3.2.0 closed memory-completeness gaps. v3.3.3 closes the **adoption** gap — the install flow now discovers any existing knowledge system on the host, migrates everything into the KS as a single source of truth, and rewrites every source file as a thin pointer index that an AI can grep locally and resolve through MCP one row at a time.
+
+The vision (verbatim from the issue that prompted this release):
+
+> *"any system the user is using to manage context and knowledge — migrate all of that to the DB as a single source of truth, replace the files with detailed pointers that per-project give the DB row # and tags. The AI greps the local file (as it's trained to do), then uses MCP to fetch the row data and only get what it needs when it needs it. Limit the context to just what is relevant now."*
+
+### Added
+
+- **`runaway adopt` orchestrator** — one command that runs the full adoption pipeline: scan for any existing knowledge.db, recommend the right migrate/import-legacy action per discovered shape, ingest Claude per-project auto-memory MDs, ingest hand-edited `CLAUDE.md` / `AGENTS.md` / `.cursor/rules`, regenerate every `MEMORY.md` as a tag-rich pointer index. Each step is independently idempotent. Default is dry-run; `--apply` writes. New module: `runaway_context.adopt`.
+- **`runaway doctor --scan`** — walks `~`, `/var/www/html`, `/srv`, `/opt` (bounded depth) for `knowledge.db` files and classifies each as `v3` / `v2` / `v1` / `foreign_v1` / `foreign` / `partial` / `empty` / `unreadable`. Surfaces row counts and notes per candidate. Also wired as the new `INSTALL_LOCATION_AMBIGUOUS` doctor check that fires when >1 candidate is found on the host. Closes the gap where non-canonical installs (e.g. `/var/www/html/_KnowledgeStore`) were invisible to the default flow.
+- **`runaway markdown ingest`** — parses hand-edited markdown files (sections become `knowledge_chunks` rows, recognized lesson bullets `- LL:` / `- Rule:` / `- Scar:` become `lessons_learned` rows), then rewrites each file as a pointer index sealed with an `INGEST_MARKER` for idempotency. Refuses writes under system roots (`/etc/`, `/usr/`, etc.) and refuses re-ingestion of marked files unless `--force`. New module: `runaway_context.markdown_ingest`.
+- **import-legacy `foreign` mode** — extends the legacy importer beyond canonical v1 + homemade-sessions. The new branch catches any DB whose `lessons_learned` has a v2-compatible column set but **no `knowledge_chunks` table** (the Parkway `_KnowledgeStore` case: ~90 lessons, custom Python wrapper, no chunks side). Source path accepts a `.db` file directly OR a directory. Also recognizes the `slug` column as a `project` alias. Rows land with `source='import_legacy'`.
+- **`detect_partial_shape()` + `PARTIAL_SHAPE` doctor check** — flags DBs that have one of (`knowledge_chunks`, `lessons_learned`) but not the other. The migrator was previously creating the missing table silently; the new check WARNs that homemade data under a different name would be ignored and recommends `import-legacy` instead.
+- **Tag-rich pointer rewriter** — `runaway brief-rewrite-pointers` now emits `- LL#N [tag1, tag2] — title` lines (was `- LL#N — title`). Project tags + free tags are deduped and capped at 5. This makes the local pointer index grep-rich: an AI can find relevant rows without fetching the DB, then resolve detail via MCP only for the rows it actually needs.
+- **`runaway memory ingest --map DIR=SLUG`** — explicit dir-to-slug override for the auto-detect heuristic. Repeatable. Solves the case where two project memory dirs would heuristically resolve to the same registry slug.
+- **`INSTALL_PROMPT.md` updated** — new step 6 (discover) precedes the install dir decision; step 10 wires in `runaway adopt`; the v2-upgrade sub-prompt no longer hard-codes `~/_knowledge` and explicitly handles the foreign/partial branches. The MCP-merge behaviour is noted inline.
+- **41 new tests** across the modules above. Full suite: **737 passing, zero failures** (was 696 + the 2 long-standing env failures, both fixed below).
+
+### Fixed
+
+- **`test_e09_cli_module_entry_point_runs` and `test_hr_03_cli_hard_delete_requires_both_flags`** were spawning `[sys.executable, "-m", "runaway_context.cli", ...]` without `PYTHONPATH=src`. They failed on any fresh checkout where the package wasn't pip-installed into the system Python — including the canonical INSTALL_PROMPT flow if step 5 (pytest) ran before step 4 (pip install) had reached the test's interpreter. Now both pass `env={**os.environ, "PYTHONPATH": str(repo_root / "src")}` to the subprocess. **These were the only two failures in v3.2.0; with this fix the suite is fully green.**
+
+### Changed
+
+- `doctor.run_diagnostics()` now runs `check_install_location_ambiguous` and `check_partial_shape` alongside the existing checks. Both are read-only.
+- `import_legacy.run()` accepts either a directory OR a `.db` file path for the `source_dir` argument. Inside a dir, `knowledge.db` is probed before `sessions.db`.
+- `doctor.__all__` exports `scan_install_candidates`, `check_install_location_ambiguous`, and `check_partial_shape`.
+
+### Why "v3.3.3" (skipping 3.3.0/.1/.2)
+
+This release bundles five small fixes that were originally planned as v3.3.0, plus the three larger items (foreign-mode importer, markdown ingestor, `runaway adopt` orchestrator) that the user explicitly elevated into the same release after the vision conversation. The version number reflects the substance — adoption + memory + parity, all together — rather than the sequence.
+
+### Notes
+
+- **Per-row provenance is now actionable**. Every row inserted via the new ingestors carries a `source` value (`memory:<path>`, `handedited:<path>`, `import_legacy`). You can audit what came from where via `SELECT source, COUNT(*) FROM knowledge_chunks GROUP BY source`. The same column was added in v3.2.0; v3.3.3 is the release that actually populates it across the full pipeline.
+- **The pointer-MD contract holds.** Every rewriter (`memory ingest`, `markdown ingest`, `brief-rewrite-pointers`) respects HR-5 no-clobber semantics: hand-edited files without an `AUTO-GENERATED` or `INGESTED` marker are skipped. Use `--force` if you really want to overwrite.
+- **MCP row-fetch path is unchanged.** The `get_chunk` and `get_lesson` MCP tools (shipped v3.0.0) are the resolution path AIs use after grepping the pointer files. No new MCP surface was needed.
+
+---
+
 ## [3.2.0] — 2026-05-18
 
 Memory-completeness + v2-parity release. v3.1.0 closed the install-completeness gaps; v3.2.0 closes the **memory-completeness** gaps. A real upgrade audit (the 2026-05-17 session that left 31 orphan auto-memory MDs on a single user's machine) plus a thorough v2→v3 review surfaced eight distinct items; all eight are addressed here.

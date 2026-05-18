@@ -52,7 +52,18 @@ def _canonicalize(slug: str) -> str:
 
 
 def _detect_layout(src_db: Path) -> str:
-    """Return one of: ``canonical_v1``, ``homemade``, ``unknown``."""
+    """Return one of: ``canonical_v1``, ``homemade``, ``foreign``, ``unknown``.
+
+    - ``canonical_v1``: knowledge_chunks + lessons_learned + lessons has
+      ``prevention_rule``. The original RunawayContext v1 shape.
+    - ``homemade``: knowledge_chunks + lessons_learned + lessons has the
+      old Steven-rolled ``lesson`` / ``context`` columns.
+    - ``foreign`` (NEW in v3.3.3): ``lessons_learned`` is present with a
+      v2-compatible column set (title + prevention_rule OR lesson/context),
+      but ``knowledge_chunks`` is **missing**. Catches homemade KS designs
+      that built only the lessons surface (e.g., Parkway _KnowledgeStore).
+    - ``unknown``: nothing recognizable.
+    """
     if not src_db.exists():
         return "unknown"
     conn = sqlite3.connect(str(src_db))
@@ -63,15 +74,23 @@ def _detect_layout(src_db: Path) -> str:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        if not {"knowledge_chunks", "lessons_learned"}.issubset(tables):
+        if "lessons_learned" not in tables:
             return "unknown"
         ll_cols = {
             r[1] for r in conn.execute("PRAGMA table_info(lessons_learned)")
         }
-        if "prevention_rule" in ll_cols:
+        has_chunks = "knowledge_chunks" in tables
+        has_v1_lessons = "prevention_rule" in ll_cols
+        has_homemade_lessons = "lesson" in ll_cols or "context" in ll_cols
+        if has_chunks and has_v1_lessons:
             return "canonical_v1"
-        if "lesson" in ll_cols or "context" in ll_cols:
+        if has_chunks and has_homemade_lessons:
             return "homemade"
+        # Lessons present, chunks missing -> 'foreign' (a homemade KS that
+        # skipped the chunks side, e.g. Parkway). Require at least one
+        # recognized lesson-content column so we don't try to import junk.
+        if not has_chunks and (has_v1_lessons or has_homemade_lessons):
+            return "foreign"
         return "unknown"
     finally:
         conn.close()
@@ -163,9 +182,17 @@ def _import_chunks(
     dst = sqlite3.connect(str(knowledge_db))
     try:
         dst.row_factory = sqlite3.Row
-        src_cols = {
-            r[1] for r in src_conn.execute("PRAGMA table_info(knowledge_chunks)")
-        }
+        # Source table may not exist at all (foreign mode — lessons-only KS).
+        try:
+            src_cols = {
+                r[1] for r in src_conn.execute(
+                    "PRAGMA table_info(knowledge_chunks)"
+                )
+            }
+        except sqlite3.OperationalError:
+            return {"imported": 0, "skipped": 0, "reason": "no knowledge_chunks table"}
+        if not src_cols:
+            return {"imported": 0, "skipped": 0, "reason": "no knowledge_chunks table"}
         wanted = [
             "project", "project_tags", "topic", "title", "body", "tags",
             "created_at", "updated_at",
@@ -230,8 +257,10 @@ def _import_lessons(
     src_cols = {
         r[1] for r in src_conn.execute("PRAGMA table_info(lessons_learned)")
     }
+    # Some homemade KS use 'slug' instead of 'project' for the canonical-slug
+    # column (Parkway shape). Pull both; resolve at row time.
     wanted = [
-        "project", "project_tags", "title", "prevention_rule", "lesson",
+        "project", "slug", "project_tags", "title", "prevention_rule", "lesson",
         "context", "what_happened", "why", "the_fix", "severity",
         "created_at", "updated_at",
     ]
@@ -247,11 +276,12 @@ def _import_lessons(
     try:
         for row in rows:
             r = dict(zip(select_cols, row))
-            raw_proj = r.get("project") or "general"
+            # 'project' wins if present; fall back to 'slug' (Parkway shape).
+            raw_proj = r.get("project") or r.get("slug") or "general"
             canonical = slug_map.get(raw_proj) or _canonicalize(raw_proj)
             project_tags = r.get("project_tags") or f'["{canonical}"]'
 
-            # Homemade → canonical field mapping
+            # Field mapping by layout
             prevention_rule = r.get("prevention_rule")
             if not prevention_rule and layout == "homemade":
                 prevention_rule = r.get("lesson") or ""
@@ -360,6 +390,22 @@ def _import_sessions(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_source_db(source: Path) -> Optional[Path]:
+    """Pick the source DB given a path that's either a dir or a ``.db`` file.
+
+    Probes in order: ``<source>`` if it's a file; ``<source>/knowledge.db``
+    (v2/v3/Parkway shape); ``<source>/sessions.db`` (v1 RC shape).
+    Returns ``None`` when nothing matches.
+    """
+    if source.is_file():
+        return source
+    for candidate in ("knowledge.db", "sessions.db"):
+        c = source / candidate
+        if c.exists():
+            return c
+    return None
+
+
 def run(
     cfg: Config,
     source_dir: Path,
@@ -369,9 +415,11 @@ def run(
 ) -> Dict[str, Any]:
     """Detect the legacy layout under *source_dir* and import its rows.
 
-    Looks for a ``sessions.db`` directly under *source_dir*. Detects whether
-    it is canonical v1 or homemade. Imports chunks, lessons, sessions into
-    the v3 install at ``cfg.install_dir``.
+    Accepts either a directory (probes ``knowledge.db`` then ``sessions.db``)
+    OR a path to a ``.db`` file directly. Detects whether the file is
+    canonical v1, homemade, or foreign (homemade KS with lessons but no
+    chunks). Imports chunks, lessons, sessions into the v3 install at
+    ``cfg.install_dir``.
 
     Returns:
         Report dict ``{status, layout, chunks, lessons, sessions, source}``.
@@ -381,31 +429,39 @@ def run(
         Importing from a source that has no recognized layout — returns
         ``status=unrecognized`` rather than raising.
     """
-    src_db = source_dir / "sessions.db"
+    src_db = _resolve_source_db(source_dir)
+    if src_db is None:
+        return {
+            "status": "unrecognized",
+            "source": str(source_dir),
+            "reason": "no .db file under source path",
+        }
     layout = _detect_layout(src_db)
     if layout == "unknown":
         return {
             "status": "unrecognized",
             "source": str(source_dir),
-            "reason": "no sessions.db with a recognized schema",
+            "reason": f"{src_db} schema not recognized",
         }
 
     registered = _existing_slugs(cfg.install_dir)
 
-    # Pass 1: pre-register every distinct source slug (one client lifecycle).
+    # Pass 1: pre-register every distinct source slug. Try both 'project' and
+    # 'slug' column names (Parkway/foreign shape uses 'slug').
     src_conn = sqlite3.connect(str(src_db))
     try:
         raw_slugs: List[str] = []
         for tbl in ("knowledge_chunks", "lessons_learned"):
-            try:
-                raw_slugs.extend(
-                    row[0] or "general"
-                    for row in src_conn.execute(
-                        f"SELECT DISTINCT project FROM {tbl}"
+            for col in ("project", "slug"):
+                try:
+                    raw_slugs.extend(
+                        row[0] or "general"
+                        for row in src_conn.execute(
+                            f"SELECT DISTINCT {col} FROM {tbl}"
+                        )
                     )
-                )
-            except sqlite3.OperationalError:
-                pass  # HR-8: missing column is non-fatal
+                except sqlite3.OperationalError:
+                    pass  # HR-8: missing column or table is non-fatal
         raw_slugs = sorted(set(raw_slugs))
     finally:
         src_conn.close()

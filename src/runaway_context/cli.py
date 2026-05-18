@@ -413,6 +413,38 @@ def cmd_brief_preview(args: argparse.Namespace) -> int:
         return EXIT_OK
 
 
+def _format_tag_list(project_tags_json: str, free_tags_json: str = "[]") -> str:
+    """Render up-to-5 tags as ``[ tag1, tag2 ]`` (or empty string if none).
+
+    Project tags come first (they're the canonical-slug list), free-text tags
+    fill remaining slots. Cap at 5 to keep the pointer line under ~150 chars.
+    """
+    try:
+        proj = json.loads(project_tags_json) if project_tags_json else []
+        free = json.loads(free_tags_json) if free_tags_json else []
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(proj, list):
+        proj = []
+    if not isinstance(free, list):
+        free = []
+    seen: set = set()
+    out: List[str] = []
+    for tag in list(proj) + list(free):
+        if not isinstance(tag, str):
+            continue
+        tag = tag.strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+        if len(out) >= 5:
+            break
+    if not out:
+        return ""
+    return " [" + ", ".join(out) + "]"
+
+
 def cmd_brief_rewrite_pointers(args: argparse.Namespace) -> int:
     """Rewrite Claude Code per-project ``MEMORY.md`` files as pointer-only indexes.
 
@@ -466,20 +498,25 @@ def cmd_brief_rewrite_pointers(args: argparse.Namespace) -> int:
         import sqlite3
         conn = sqlite3.connect(str(client._knowledge_db))
         try:
-            for rid, title in conn.execute(
-                "SELECT id, title FROM lessons_learned "
+            for rid, title, tags_json in conn.execute(
+                "SELECT id, title, COALESCE(project_tags, '[]') "
+                "FROM lessons_learned "
                 "WHERE project = ? AND deleted_at IS NULL ORDER BY id",
                 (slug,),
             ):
                 hook = (title or "").strip().splitlines()[0][:120]
-                lines.append(f"- LL#{rid} — {hook}")
-            for rid, title in conn.execute(
-                "SELECT id, title FROM knowledge_chunks "
+                tags = _format_tag_list(tags_json)
+                lines.append(f"- LL#{rid}{tags} — {hook}")
+            for rid, title, tags_json, free_tags in conn.execute(
+                "SELECT id, title, COALESCE(project_tags, '[]'), "
+                "COALESCE(tags, '[]') "
+                "FROM knowledge_chunks "
                 "WHERE project = ? AND deleted_at IS NULL ORDER BY id",
                 (slug,),
             ):
                 hook = (title or "").strip().splitlines()[0][:120]
-                lines.append(f"- KC#{rid} — {hook}")
+                tags = _format_tag_list(tags_json, free_tags)
+                lines.append(f"- KC#{rid}{tags} — {hook}")
         finally:
             conn.close()
         content = "\n".join(lines) + "\n"
@@ -991,6 +1028,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     cfg = _load_config(args)
 
+    if getattr(args, "scan", False):
+        candidates = _doctor.scan_install_candidates()
+        if args.json:
+            print(json.dumps(candidates, indent=2, default=str))
+        elif not candidates:
+            print("no knowledge.db candidates found on standard roots")
+        else:
+            print(f"runaway doctor --scan — {len(candidates)} candidate(s):\n")
+            for c in candidates:
+                rc = c.get("row_counts") or {}
+                rc_str = ", ".join(f"{k}={v}" for k, v in rc.items()) or "(empty)"
+                notes = f"  -- {c['notes']}" if c.get("notes") else ""
+                print(f"  [{c['shape']:>10}] {c['path']}{notes}")
+                print(f"             {rc_str}")
+        return EXIT_OK
+
     if getattr(args, "list_reverts", False):
         batches = _fix.list_batches()
         if not batches:
@@ -1216,6 +1269,100 @@ def cmd_sessions_budget(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_adopt(args: argparse.Namespace) -> int:
+    """Run the one-shot adoption flow: discover -> migrate/import -> ingest -> rewrite.
+
+    Walks every step in :mod:`runaway_context.adopt` and prints a JSON report
+    enumerating recommended commands (dry-run mode) or actual results
+    (when ``--apply`` is set). Each step is independently idempotent — re-runs
+    are safe.
+
+    Returns:
+        ``EXIT_OK`` on success regardless of per-step recommendations.
+        ``EXIT_REFUSED`` (2) when ``--apply`` was requested but no target
+        install exists and ``--target-install-dir`` was not provided.
+
+    Refuses:
+        Apply mode without a usable target install. Use ``runaway init`` or
+        pass ``--target-install-dir`` first.
+    """
+    from runaway_context import adopt as _adopt
+
+    cfg = _load_config(args)
+    target = (
+        Path(args.target_install_dir).expanduser()
+        if args.target_install_dir else cfg.install_dir
+    )
+    apply = bool(args.apply)
+    if apply and not (target / "knowledge.db").exists():
+        _eprint(
+            f"runaway: --apply refuses to run against {target} — no knowledge.db. "
+            "Run `runaway init --install-dir <dir>` first, or pass "
+            "--target-install-dir <existing v3 install>."
+        )
+        return EXIT_REFUSED
+
+    project_roots = (
+        [Path(r).expanduser() for r in args.project_root]
+        if args.project_root else None
+    )
+    claude_root = (
+        Path(args.claude_root).expanduser() if args.claude_root else None
+    )
+    report = _adopt.run(
+        target_install_dir=target,
+        project_roots=project_roots,
+        project_slug=args.project,
+        apply=apply,
+        claude_projects_root=claude_root,
+    )
+    print(json.dumps(report.to_dict(), indent=2, default=str))
+    return EXIT_OK
+
+
+def cmd_markdown_ingest(args: argparse.Namespace) -> int:
+    """Ingest hand-edited CLAUDE.md / AGENTS.md / .cursor/rules into the KS.
+
+    Each ``## Heading`` block becomes a ``knowledge_chunks`` row; recognized
+    lesson bullets (``- LL: ...`` / ``- Rule: ...``) become
+    ``lessons_learned`` rows. Original files are rewritten as pointer indexes
+    after the first pass; the INGEST_MARKER makes the operation idempotent.
+
+    Returns:
+        ``EXIT_OK`` always; per-file errors are encoded in the JSON report.
+
+    Refuses:
+        Writing into system roots (``/etc/`` etc.). Re-ingesting a marked
+        file without ``--force``.
+    """
+    from runaway_context import markdown_ingest as mi
+    from runaway_context.client import Client
+
+    cfg = _load_config(args)
+    client = Client(install_dir=cfg.install_dir)
+    roots = [Path(r).expanduser() for r in (args.root or [Path.home()])]
+    report = mi.ingest_all(
+        client, project=args.project, roots=roots,
+        dry_run=bool(args.dry_run), force=bool(args.force),
+    )
+    out = {
+        "dry_run": report.dry_run,
+        "project": args.project,
+        "counts": report.counts(),
+        "records": [
+            {
+                "path": str(r.path), "action": r.action,
+                "sections_inserted": r.sections_inserted,
+                "lessons_inserted": r.lessons_inserted,
+                "detail": r.detail,
+            }
+            for r in report.records
+        ],
+    }
+    print(json.dumps(out, indent=2, default=str))
+    return EXIT_OK
+
+
 def cmd_multiuser_provision(args: argparse.Namespace) -> int:
     """Provision RunawayContext for every Claude user on a shared host.
 
@@ -1290,11 +1437,23 @@ def cmd_memory_ingest(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     client = Client(install_dir=cfg.install_dir)
     root = Path(args.claude_root).expanduser() if args.claude_root else None
+    explicit_map = {}
+    for entry in (args.map or []):
+        if "=" not in entry:
+            _eprint(f"runaway: --map entry {entry!r} must be 'dirname=slug'")
+            return EXIT_USAGE
+        k, _, v = entry.partition("=")
+        k, v = k.strip(), v.strip()
+        if not k or not v:
+            _eprint(f"runaway: --map entry {entry!r} has empty dirname or slug")
+            return EXIT_USAGE
+        explicit_map[k] = v
     report = mi.ingest_all(
         client,
         claude_projects_root=root,
         project_filter=args.project,
         dry_run=bool(args.dry_run),
+        explicit_map=explicit_map or None,
     )
     out = {
         "dry_run": report.dry_run,
@@ -1648,6 +1807,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Restore files from the named doctor-backups batch.")
     p.add_argument("--list-reverts", action="store_true",
                    help="List available revert timestamps under ~/.runaway/doctor-backups/.")
+    p.add_argument("--scan", action="store_true",
+                   help="Walk common roots for knowledge.db candidates and "
+                        "report each one's shape (v3/v2/v1/foreign/partial). "
+                        "Use --json for AI-friendly output.")
     p.set_defaults(_handler=cmd_doctor)
 
     # uninstall -----------------------------------------------------------
@@ -1822,7 +1985,53 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Only process memory dirs that map to this canonical slug.")
     p.add_argument("--claude-root", default=None,
                    help="Override ~/.claude/projects (for tests/alt installs).")
+    p.add_argument("--map", action="append", default=None, metavar="DIR=SLUG",
+                   help="Force a specific memory-dir name to map to a slug, "
+                        "overriding the auto-detect heuristic. Repeat the flag "
+                        "for multiple mappings: --map -var-www-html=parkway "
+                        "--map -var-www-html-Estimating=estimate_helper")
     p.set_defaults(_handler=cmd_memory_ingest)
+
+    # adopt ----------------------------------------------------------------
+    p = sub.add_parser(
+        "adopt",
+        help="One-shot: discover any existing knowledge system, migrate/import "
+             "everything into the KS, rewrite source files as pointers.",
+    )
+    p.add_argument("--target-install-dir", default=None,
+                   help="Target v3 install dir; defaults to current install.")
+    p.add_argument("--apply", action="store_true",
+                   help="Actually run the steps. Default is dry-run / report only.")
+    p.add_argument("--project", default="general",
+                   help="Canonical slug attributed to hand-edited MD content "
+                        "(memory-ingest auto-detects per dir; this is for the "
+                        "constitution/brief sweep).")
+    p.add_argument("--project-root", action="append", default=None,
+                   help="Root dir to walk for CLAUDE.md/AGENTS.md/.cursor/rules. "
+                        "Repeat for multiple roots. Defaults to ~.")
+    p.add_argument("--claude-root", default=None,
+                   help="Override ~/.claude/projects (tests / alt installs).")
+    p.set_defaults(_handler=cmd_adopt)
+
+    # markdown -------------------------------------------------------------
+    p_md = sub.add_parser(
+        "markdown",
+        help="Ingest hand-edited CLAUDE.md / AGENTS.md / .cursor/rules.",
+    )
+    md_sub = p_md.add_subparsers(dest="markdown_command", metavar="<md_cmd>")
+
+    p = md_sub.add_parser(
+        "ingest",
+        help="Walk root dirs, extract sections + lesson bullets, write to KS.",
+    )
+    p.add_argument("--project", required=True,
+                   help="Canonical slug owning the ingested content.")
+    p.add_argument("--root", action="append", default=None,
+                   help="Project root to walk (repeatable). Defaults to ~.")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--force", action="store_true",
+                   help="Re-ingest files that already carry the INGEST_MARKER.")
+    p.set_defaults(_handler=cmd_markdown_ingest)
 
     # import-legacy --------------------------------------------------------
     p = sub.add_parser(
